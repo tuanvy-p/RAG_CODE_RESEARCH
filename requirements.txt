@@ -1,0 +1,27 @@
+# Google Gemini SDK & LangChain
+google-genai
+langchain-google-genai
+langchain
+langchain-community
+python-dotenv
+tiktoken
+
+# Vector Store & Search (Dense + Sparse Hybrid Retrieval)
+faiss-cpu
+rank-bm25
+rapidfuzz
+
+# Syntax Parsing (AST) & Semantic Chunking
+tree-sitter>=0.22.0
+tree-sitter-python>=0.21.0
+tree-sitter-languages
+
+# Graph Analysis & Dependency Modeling
+networkx
+
+# Evaluation Metrics & Utilities
+codebleu
+rouge-score
+tqdm
+pydantic
+

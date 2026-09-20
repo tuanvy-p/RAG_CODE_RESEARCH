@@ -1,0 +1,29 @@
+venv/
+.env
+outputs/
+*.pyc
+__pycache__/
+*.faiss
+
+# Bỏ qua toàn bộ thư mục data và các tệp dữ liệu lớn
+data/
+*.csv
+*.zip
+*.tar.gz
+*.npy
+*.pth
+*.h5
+
+# Bỏ qua môi trường ảo & cache Python
+venv/
+.venv/
+__pycache__/
+.DS_Store
+
+# Bỏ qua dữ liệu và tệp index nặng
+data/
+*.faiss
+*.pth
+*.bin
+*.pt
+*.onnx
