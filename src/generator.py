@@ -1,13 +1,13 @@
-from typing import List, Dict, Optional, Any, Tuple
-import re
+from typing import List, Dict, Optional, Any
 import os
-import time
-from groq import Groq
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
 
 from .ast_parser import CodeChunk
 from .config import config
 
 from dotenv import load_dotenv
+
 
 class PromptBuilder:
     """
@@ -33,7 +33,7 @@ class PromptBuilder:
             if chunk.signature:
                 header += f"\n# Signature: {chunk.signature}"
             
-            # Cắt bớt code nếu chunk quá dài (> 30 dòng) để tránh vượt quá ITPM limit
+            # Cắt bớt code nếu chunk quá dài (> 30 dòng)
             code_lines = chunk.code.splitlines()
             if len(code_lines) > 30:
                 truncated_code = "\n".join(code_lines[:30]) + "\n# ... (truncated)"
@@ -52,9 +52,6 @@ class PromptBuilder:
         context_chunks: Optional[List[CodeChunk]] = None,
         file_path: str = "current_file.py"
     ) -> str:
-        """
-        Combines repository context and current file prefix into the final prompt.
-        """
         context_block = cls.build_context_block(context_chunks or [])
         
         prompt = (
@@ -71,84 +68,98 @@ class PromptBuilder:
 class CodeGenerator:
     def __init__(
         self,
-        api_key: Optional[str] = None,
         model_name: Optional[str] = None,
-        temperature: Optional[float] = None
+        temperature: Optional[float] = None,
+        device: Optional[str] = None
     ):
-        # Nạp lại biến môi trường
         load_dotenv()
         
-        # Đọc GROQ_API_KEY từ os.getenv hoặc config
-        self.api_key = api_key or os.getenv("GROQ_API_KEY") or getattr(config.model, 'api_key', None)
-        
-        # Thứ tự ưu tiên: Tham số truyền vào -> os.getenv("LLM_MODEL") -> config -> fallback default
+        # Lấy tên model local từ config
         selected_model = (
             model_name
             or os.getenv("LLM_MODEL")
             or config.model.llm_model
-            or "openai/gpt-oss-120b"
+            or "Qwen/Qwen2.5-Coder-7B-Instruct"
         )
-
-            
+        
         self.model_name = str(selected_model).strip()
         self.temperature = temperature if temperature is not None else config.model.temperature
+        self.device = device or getattr(config.model, 'device', 'cuda' if torch.cuda.is_available() else 'cpu')
 
-        if not self.api_key:
-            print("[Warning] GROQ_API_KEY is not set. Generator will fail until key is configured.")
-            self.client = None
+        print(f"[*] Loading Local LLM Model: `{self.model_name}` on `{self.device}`...")
+
+        # Khởi tạo Tokenizer & Model
+        self.tokenizer = AutoTokenizer.from_pretrained(self.model_name, trust_remote_code=True)
+        
+        # Cấu hình load model dạng FP16 hoặc INT4 để tối ưu VRAM
+        model_kwargs = {
+            "device_map": "auto",
+            "trust_remote_code": True
+        }
+        
+        if getattr(config.model, 'use_4bit', False):
+            from transformers import BitsAndBytesConfig
+            model_kwargs["quantization_config"] = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_compute_dtype=torch.float16
+            )
         else:
-            self.client = Groq(api_key=self.api_key)
+            model_kwargs["torch_dtype"] = torch.float16 if self.device == "cuda" else torch.float32
+
+        self.model = AutoModelForCausalLM.from_pretrained(self.model_name, **model_kwargs)
+        
+        # Tạo pipeline sinh văn bản local
+        self.pipe = pipeline(
+            "text-generation",
+            model=self.model,
+            tokenizer=self.tokenizer
+        )
+        print(f"[SUCCESS] Model `{self.model_name}` loaded successfully!")
 
     def generate(
         self,
         prompt: str,
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
-        is_line_level: bool = False,
-        max_retries: int = 3
+        is_line_level: bool = False
     ) -> str:
         """
-        Calls Groq API with the given prompt, including auto-retry on Rate Limits.
+        Runs local inference using Hugging Face pipeline.
         """
-        if not self.client:
-            raise ValueError("Groq API key is not configured. Please set GROQ_API_KEY in .env")
-
         temp = temperature if temperature is not None else self.temperature
         tokens = max_tokens if max_tokens is not None else getattr(config.model, 'max_tokens', 512)
-        stop_sequences = ["\n"] if is_line_level else None
 
-        for attempt in range(max_retries):
-            try:
-                completion = self.client.chat.completions.create(
-                    model=self.model_name,
-                    messages=[
-                        {
-                            "role": "system",
-                            "content": PromptBuilder.SYSTEM_PROMPT
-                        },
-                        {
-                            "role": "user",
-                            "content": prompt
-                        }
-                    ],
-                    temperature=temp,
-                    max_completion_tokens=tokens,
-                    stop=stop_sequences
-                )
-                
-                raw_text = completion.choices[0].message.content or ""
-                return self._clean_completion_output(raw_text, is_line_level=is_line_level)
-                
-            except Exception as e:
-                err_msg = str(e)
-                if "429" in err_msg or "rate_limit_exceeded" in err_msg:
-                    print(f"\n[Warning] Rate limit hit (Attempt {attempt+1}/{max_retries}). Waiting 10s...")
-                    time.sleep(10)
-                else:
-                    print(f"\n[Error] Groq API generation error: {e}")
-                    break
+        # Định dạng prompt dạng Chat / System message tương thích với Qwen / Llama
+        messages = [
+            {"role": "system", "content": PromptBuilder.SYSTEM_PROMPT},
+            {"role": "user", "content": prompt}
+        ]
 
-        return ""
+        formatted_prompt = self.tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True
+        )
+
+        try:
+            outputs = self.pipe(
+                formatted_prompt,
+                max_new_tokens=tokens,
+                temperature=temp,
+                do_sample=True if temp > 0 else False,
+                pad_token_id=self.tokenizer.eos_token_id
+            )
+
+            # Lấy chuỗi mã được sinh ra (loại bỏ phần prompt ban đầu)
+            full_generated = outputs[0]["generated_text"]
+            raw_text = full_generated[len(formatted_prompt):]
+
+            return self._clean_completion_output(raw_text, is_line_level=is_line_level)
+
+        except Exception as e:
+            print(f"\n[Error] Local generation error: {e}")
+            return ""
 
     def generate_with_repocoder_loop(
         self,
@@ -160,20 +171,17 @@ class CodeGenerator:
         is_line_level: bool = False
     ) -> Dict[str, Any]:
         """
-        Executes the RepoCoder Iterative Retrieval-Generation Loop:
-        - Round 0: Query = Prefix sliding window -> Retrieve Context -> Generate initial Code_0
-        - Round 1..N: Query = Prefix + Code_{i-1} -> Retrieve updated Context -> Refine Code_i
+        Executes the RepoCoder Iterative Retrieval-Generation Loop.
         """
         history: List[Dict[str, Any]] = []
         current_prediction = ""
 
-        # Extract initial query from prefix
         lines = prefix_code.splitlines()
         window_size = config.repocoder.sliding_window_size
         current_query = "\n".join(lines[-window_size:]) if len(lines) > window_size else prefix_code
 
         for iteration in range(max_iterations):
-            # 1. Retrieve Context using current query
+            # 1. Retrieve Context
             retrieved_chunks = retriever.retrieve(
                 query=current_query,
                 top_k=top_k,
@@ -183,20 +191,19 @@ class CodeGenerator:
                 hops=config.retriever.graph_expansion_hops
             )
 
-            # 2. Build prompt with current retrieved context
+            # 2. Build prompt
             prompt = PromptBuilder.build_completion_prompt(
                 prefix_code=prefix_code,
                 context_chunks=retrieved_chunks,
                 file_path=file_path
             )
 
-            # 3. Generate completion via Groq
+            # 3. Generate completion locally
             current_prediction = self.generate(
                 prompt=prompt,
                 is_line_level=is_line_level
             )
 
-            # Record iteration history
             history.append({
                 "iteration": iteration + 1,
                 "query_used": current_query,
@@ -204,7 +211,6 @@ class CodeGenerator:
                 "generated_code": current_prediction
             })
             
-            # 4. Formulate new query for next iteration
             current_query = f"{current_query}\n{current_prediction}"
 
         return {
@@ -220,11 +226,9 @@ class CodeGenerator:
         """
         text = raw_output.strip()
         
-        # Remove <COMPLETION_START> if mirrored by LLM
         if "<COMPLETION_START>" in text:
             text = text.split("<COMPLETION_START>")[-1].strip()
 
-        # Remove markdown code block wrapping (```python ... ``` or ``` ... ```)
         if text.startswith("```"):
             lines = text.splitlines()
             if len(lines) > 0 and lines[0].startswith("```"):
@@ -233,7 +237,6 @@ class CodeGenerator:
                 lines = lines[:-1]
             text = "\n".join(lines).strip()
 
-        # Nếu là line level: Lấy duy nhất dòng code đầu tiên có nội dung
         if is_line_level:
             non_empty_lines = [l for l in text.splitlines() if l.strip()]
             return non_empty_lines[0] if non_empty_lines else ""
@@ -241,21 +244,17 @@ class CodeGenerator:
         return text
 
     def test_connection(self) -> bool:
-        if not self.client:
-            print("[Error] Groq API client chưa được khởi tạo. Kiểm tra GROQ_API_KEY trong .env")
-            return False
-
-        # In rõ model_name ra màn hình để kiểm tra
-        print(f"[*] Testing LLM API connection with model: `{self.model_name}`...")
+        """
+        Tests if local LLM model is ready in memory.
+        """
+        print(f"[*] Testing Local LLM inference with model: `{self.model_name}`...")
         try:
-            response = self.client.chat.completions.create(
-                model=self.model_name, # Ép dùng đúng self.model_name
-                messages=[{"role": "user", "content": "hi"}],
-                max_completion_tokens=1
-            )
-            print(f"[SUCCESS] LLM connection OK! Model `{self.model_name}` sẵn sàng.\n")
-            return True
+            res = self.generate(prompt="print('hello')", max_tokens=10)
+            if res is not None:
+                print(f"[SUCCESS] Local LLM `{self.model_name}` is ready!\n")
+                return True
+            return False
         except Exception as e:
-            print(f"\n[CRITICAL ERROR] Kiểm tra LLM thất bại với model `{self.model_name}`!")
-            print(f"Chi tiết lỗi: {e}\n")
+            print(f"\n[CRITICAL ERROR] Failed to run local model `{self.model_name}`!")
+            print(f"Error details: {e}\n")
             return False

@@ -1,9 +1,12 @@
 import os
 import argparse
+import shutil
+import time
 from pathlib import Path
 from typing import List, Tuple, Dict, Optional, Any
 from tqdm import tqdm
-import time
+from dotenv import load_dotenv
+
 from src.config import config
 from src.data_loader import RepoDataLoader
 from src.ast_parser import ASTParser, CodeChunk
@@ -11,17 +14,35 @@ from src.dependency_graph import DependencyGraph
 from src.retriever import HybridRetriever, DenseRetriever, BM25Retriever
 from src.generator import CodeGenerator
 from src.evaluator import CodeEvaluator
-from dotenv import load_dotenv
+from src.checkpoint import backup_to_kaggle_dataset
 
 # Nạp biến môi trường
 load_dotenv(override=True)
 
+
+def setup_vector_store_with_checkpoint() -> bool:
+    """
+    Kiểm tra và phục hồi Vector DB từ Kaggle Input Dataset nếu tồn tại.
+    """
+    checkpoint_input_path = Path("/kaggle/input/code-rag-checkpoint/chroma_db_backup.zip")
+    
+    if checkpoint_input_path.exists():
+        print("[*] Found existing Kaggle Checkpoint! Unpacking Vector DB...")
+        shutil.unpack_archive(checkpoint_input_path, config.chroma_db_dir)
+        print("[SUCCESS] Vector DB restored successfully. Skipping re-indexing!")
+        return True
+    
+    print("[*] No Checkpoint found. Will build Vector DB from scratch...")
+    return False
+
+
 def index_repository(repo_path: str | Path) -> Tuple[List[CodeChunk], HybridRetriever]:
     """
     Loads all Python files from target repo, parses AST chunks, and builds Hybrid Retriever.
+    Includes automatic Kaggle Dataset backup.
     """
     print(f"\n==================================================")
-    print(f"  INDEXING REPOSITORY: {repo_path}")
+    print(f"   INDEXING REPOSITORY: {repo_path}")
     print(f"==================================================")
 
     # 1. Load files
@@ -43,7 +64,23 @@ def index_repository(repo_path: str | Path) -> Tuple[List[CodeChunk], HybridRetr
 
     # 3. Build Hybrid Retriever (FAISS + BM25 + Dependency Graph)
     retriever = HybridRetriever()
-    retriever.index_repository(all_chunks)
+    
+    # Kiểm tra nếu đã có Checkpoint thì khôi phục, không thì index mới
+    has_checkpoint = setup_vector_store_with_checkpoint()
+    
+    if not has_checkpoint:
+        retriever.index_repository(all_chunks)
+        
+        # Tự động backup Vector DB lên Kaggle Dataset ngay sau khi vừa Index xong
+        print("[*] Backing up fresh Vector DB to Kaggle Dataset...")
+        backup_to_kaggle_dataset(
+            target_dir=str(config.chroma_db_dir),
+            dataset_id="tunvyphm/code-rag-checkpoint",  #  THAY THÀNH KAGGLE USERNAME CỦA BẠN
+            zip_name="chroma_db_backup"
+        )
+    else:
+        # Nếu đã khôi phục từ checkpoint, chỉ cần nạp lại graph và BM25 cho chunks
+        retriever.index_repository(all_chunks)
 
     # Print Graph stats
     stats = retriever.graph.get_stats()
@@ -63,34 +100,31 @@ def run_benchmark_eval(
     Runs end-to-end evaluation on benchmark dataset (e.g. RepoEval / CrossCodeEval).
     """
     # ------------------------------------------------------------------
-    # BƯỚC 1: HEALTH CHECK LLM TRƯỚC (BẢO VỆ TOKEN VOYAGE AI)
+    # BƯỚC 1: HEALTH CHECK LOCAL LLM TRƯỚC
     # ------------------------------------------------------------------
-    print("\n[*] Initializing CodeGenerator & testing LLM connection...")
+    print("\n[*] Initializing CodeGenerator & testing Local LLM connection...")
     generator = CodeGenerator()
 
     print("\n========== DEBUG MODEL ==========")
     print("LLM_MODEL environment :", repr(os.getenv("LLM_MODEL")))
-    print("Config model          :", repr(config.model.llm_model))
-    print("Generator model       :", repr(generator.model_name))
-    print("Generator class file  :", generator.__class__.__module__)
+    print("Config model           :", repr(config.model.llm_model))
+    print("Generator model        :", repr(generator.model_name))
+    print("Generator class file   :", generator.__class__.__module__)
     print("=================================\n")
     
-    # Kiểm tra xem phương thức test_connection có sẵn trong CodeGenerator không
     if hasattr(generator, "test_connection"):
         is_llm_ready = generator.test_connection()
     else:
-        # Fallback test 1 token đơn giản
-        print(f"[*] Testing LLM API with model `{generator.model_name}`...")
+        print(f"[*] Testing LLM locally with model `{generator.model_name}`...")
         test_res = generator.generate("print('test')", max_tokens=2)
-        is_llm_ready = bool(test_res or generator.client)
+        is_llm_ready = bool(test_res)
 
     if not is_llm_ready:
-        print("\n[ABORT] LLM API test failed! Stopping execution before Voyage AI indexing.")
-        print("[Tip] Check your GROQ_API_KEY or LLM_MODEL in .env file.")
+        print("\n[ABORT] Local LLM initialization failed! Stopping execution.")
         return
 
     # ------------------------------------------------------------------
-    # BƯỚC 2: CHỈ INDEX REPO VÀ TỐN TOKEN VOYAGE AI KHI LLM ĐÃ SẴN SÀNG
+    # BƯỚC 2: INDEX REPO HOẶC LOAD TỪ CHECKPOINT
     # ------------------------------------------------------------------
     all_chunks, retriever = index_repository(target_repo)
 
@@ -98,14 +132,11 @@ def run_benchmark_eval(
     print(f"\n[*] Loading benchmark dataset: {benchmark_jsonl}")
     samples = RepoDataLoader.load_jsonl_benchmark(benchmark_jsonl)
     
-    # Nếu truyền max_samples thì cắt, không thì chạy 100% full dataset
     if max_samples is not None and max_samples > 0:
         samples = samples[:max_samples]
     print(f"[*] Evaluating on {len(samples)} test cases...")
 
     results = []
-
-    # BẬT CỜ IS_LINE_LEVEL TỰ ĐỘNG NẾU FILE BENCHMARK CHỨA "LINE_LEVEL"
     is_line_task = "line_level" in str(benchmark_jsonl).lower()
 
     for sample in tqdm(samples, desc="Evaluating Code Completion"):
@@ -133,13 +164,18 @@ def run_benchmark_eval(
         metrics["ground_truth"] = ground_truth
         metrics["history"] = gen_output["history"]
         results.append(metrics)
-        
-        # Nghỉ 3 giây để tránh dính Rate Limit
-        time.sleep(3.0)
 
     # 4. Summarize and export report
     output_report_path = config.outputs_dir / "evaluation_report.json"
     CodeEvaluator.evaluate_dataset(results, output_file=output_report_path)
+    
+    # Backup kết quả báo cáo lên Kaggle Dataset
+    print("[*] Backing up evaluation results to Kaggle Dataset...")
+    backup_to_kaggle_dataset(
+        target_dir=str(config.outputs_dir),
+        dataset_id="your_username/code-rag-results",  #  THAY THÀNH KAGGLE USERNAME CỦA BẠN
+        zip_name="outputs_backup"
+    )
 
 
 def run_interactive_demo(target_repo: str | Path):
@@ -154,7 +190,7 @@ def run_interactive_demo(target_repo: str | Path):
     all_chunks, retriever = index_repository(target_repo)
 
     print("\n" + "="*50)
-    print("  INTERACTIVE CODE COMPLETION (Type 'exit' to quit) ")
+    print("   INTERACTIVE CODE COMPLETION (Type 'exit' to quit) ")
     print("="*50)
 
     while True:
@@ -195,9 +231,9 @@ def run_interactive_demo(target_repo: str | Path):
 
 
 def main():
-    # Sử dụng model mặc định sẵn có nếu môi trường chưa thiết lập
+    # Model local mặc định nếu môi trường chưa thiết lập
     if "LLM_MODEL" not in os.environ:
-        os.environ["LLM_MODEL"] = "openai/gpt-oss-120b"
+        os.environ["LLM_MODEL"] = "Qwen/Qwen2.5-Coder-7B-Instruct"
 
     parser = argparse.ArgumentParser(description="RepoCoder AST: Tree-sitter + Dependency Graph + Hybrid RAG")
     parser.add_argument("--mode", choices=["demo", "benchmark"], default="demo", help="Execution mode")

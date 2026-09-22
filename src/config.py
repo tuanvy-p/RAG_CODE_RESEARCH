@@ -2,7 +2,7 @@ import os
 from pathlib import Path
 from dataclasses import dataclass, field
 from dotenv import load_dotenv
-
+import torch
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 # Load environment variables (.env with fallback to .env.example)
@@ -13,19 +13,19 @@ else:
     load_dotenv(BASE_DIR / ".env.example", override=True)
 
 # Clean and synchronize API keys in environment variables
-_raw_groq_key = (os.getenv("GROQ_API_KEY") or "").strip('"\' \n\t')
+'''_raw_groq_key = (os.getenv("GROQ_API_KEY") or "").strip('"\' \n\t')
 if _raw_groq_key:
     os.environ["GROQ_API_KEY"] = _raw_groq_key
 
 _raw_voyage_key = (os.getenv("VOYAGE_API_KEY") or "").strip('"\' \n\t')
 if _raw_voyage_key:
-    os.environ["VOYAGE_API_KEY"] = _raw_voyage_key
+    os.environ["VOYAGE_API_KEY"] = _raw_voyage_key'''
 
 DATA_DIR = BASE_DIR / "data"
 RAW_JSONL_DIR = DATA_DIR / "raw_jsonl"
 TARGET_REPOS_DIR = DATA_DIR / "target_repos"
 OUTPUTS_DIR = BASE_DIR / "outputs"
-
+CHROMA_DB_DIR = BASE_DIR / "chroma_db"
 # Ensure output directory exists
 OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -33,12 +33,17 @@ OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
 @dataclass
 class ModelConfig:
     # Groq API for LLM Generation + Voyage AI API for Code Embeddings
-    api_key: str = (os.getenv("GROQ_API_KEY") or "").strip('"\' \n\t')
-    voyage_api_key: str = (os.getenv("VOYAGE_API_KEY") or "").strip('"\' \n\t')
-    llm_model: str = os.getenv("LLM_MODEL", "openai/gpt-oss-120b")
-    embedding_model: str = os.getenv("EMBEDDING_MODEL", "voyage-code-4")
+    #api_key: str = (os.getenv("GROQ_API_KEY") or "").strip('"\' \n\t')
+    #voyage_api_key: str = (os.getenv("VOYAGE_API_KEY") or "").strip('"\' \n\t')
+    #llm_model: str = os.getenv("LLM_MODEL", "Qwen/Qwen2.5-Coder-7B-Instruct")
+    #embedding_model: str = os.getenv("EMBEDDING_MODEL", "BAAI/bge-m3")
+    llm_model: str = "Qwen/Qwen2.5-0.5B-Instruct"
+    embedding_model: str = "all-MiniLM-L6-v2"
     temperature: float = 0.2
     max_tokens: int = 512
+    device: str = "cuda" if torch.cuda.is_available() else "cpu"
+    torch_dtype: str = "float16"
+    use_4bit: bool = False
 
 
 @dataclass
