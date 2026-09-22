@@ -20,20 +20,22 @@ from .config import config
 class DenseRetriever:
     """
     Semantic Vector Retriever powered by Local HuggingFace Embedding Model (e.g. BAAI/bge-m3)
-    and FAISS IndexFlatIP (Cosine Similarity).
+    running strictly on CPU to conserve GPU VRAM for the Large Language Model.
     """
 
     def __init__(self, model_name: Optional[str] = None, device: Optional[str] = None):
         # Lấy tên mô hình local từ config (Default: BAAI/bge-m3)
         self.model_name = model_name or getattr(config.model, 'embedding_model', None) or "BAAI/bge-m3"
-        self.device = device or getattr(config.model, 'device', 'cuda' if torch.cuda.is_available() else 'cpu')
+        
+        # BẮT BUỘC CHẠY CPU CHO EMBEDDING ĐỂ TRÁNH OOM GPU
+        self.device = "cpu"
 
-        print(f"[*] Loading Local Embedding Model: `{self.model_name}` on `{self.device}`...")
+        print(f"[*] Loading Local Embedding Model: `{self.model_name}` on `CPU` (Preserving GPU VRAM for LLM)...")
         try:
-            self.model = SentenceTransformer(self.model_name, device=self.device)
+            self.model = SentenceTransformer(self.model_name, device="cpu")
             # Lấy tự động kích thước vector dimension từ model (bge-m3 là 1024)
             self.dimension = self.model.get_sentence_embedding_dimension()
-            print(f"[SUCCESS] Embedding Model loaded! Dimension = {self.dimension}")
+            print(f"[SUCCESS] Local Embedding Model loaded on CPU! Dimension = {self.dimension}")
         except Exception as e:
             print(f"[Error] Failed to load local embedding model `{self.model_name}`: {e}")
             self.model = None
@@ -48,7 +50,7 @@ class DenseRetriever:
 
     def embed_texts(self, texts: List[str], batch_size: int = 32) -> np.ndarray:
         """
-        Generates vector embeddings locally using SentenceTransformer on GPU/CPU.
+        Generates vector embeddings locally using SentenceTransformer strictly on CPU.
         """
         if not self.model:
             raise ValueError("Local Embedding Model is not initialized properly.")
@@ -57,13 +59,14 @@ class DenseRetriever:
             return np.empty((0, self.dimension), dtype="float32")
 
         try:
-            # Sinh embedding local
+            # Sinh embedding local ép buộc chạy trên CPU
             embeddings = self.model.encode(
                 texts,
                 batch_size=batch_size,
                 show_progress_bar=False,
                 convert_to_numpy=True,
-                normalize_embeddings=True # Chuẩn hóa L2 để tính Cosine Similarity qua FAISS IndexFlatIP
+                normalize_embeddings=True, # Chuẩn hóa L2 để tính Cosine Similarity qua FAISS IndexFlatIP
+                device="cpu"  # <--- BỔ SUNG DÒNG NÀY ĐỂ ĐẢM BẢO KHÔNG BỊ NHẢY LÊN CUDA
             )
             vecs = np.array(embeddings, dtype="float32")
             
@@ -90,8 +93,8 @@ class DenseRetriever:
         # Format each chunk into an information-rich text representation
         texts = [c.get_embedding_text() for c in chunks]
         
-        print(f"[DenseRetriever] Generating semantic embeddings for {len(texts)} chunks locally via {self.model_name}...")
-        vectors = self.embed_texts(texts)
+        print(f"[DenseRetriever] Generating semantic embeddings for {len(texts)} chunks locally via {self.model_name} on CPU...")
+        vectors = self.embed_texts(texts, batch_size=32)
         
         # Reset and populate FAISS index
         self.index.reset()
