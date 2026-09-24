@@ -1,4 +1,4 @@
-from typing import List, Dict, Any, Optional, Union
+from typing import List, Dict, Any, Optional
 import json
 from pathlib import Path
 from rapidfuzz.distance import Levenshtein
@@ -18,65 +18,18 @@ class CodeEvaluator:
     - Exact Match (EM)
     - Edit Similarity (Levenshtein)
     - CodeBLEU / Token BLEU
-    - Identifier Precision, Recall, & F1
+    - Identifier Precision & Recall
     """
-
-    def __init__(self):
-        pass
-
-    # =========================================================================
-    # Instance & Class Method Aliases for Full Compatibility
-    # =========================================================================
-
-    def evaluate_single_sample(self, prediction: str, ground_truth: str) -> Dict[str, float]:
-        """Instance method alias for evaluate_sample."""
-        return self.evaluate_sample(prediction, ground_truth)
-
-    def compute_aggregate_metrics(self, results: List[Dict[str, Any]]) -> Dict[str, float]:
-        """Computes aggregated metrics for live tracking in run_evaluation.py."""
-        if not results:
-            return {
-                "exact_match": 0.0,
-                "mean_edit_similarity": 0.0,
-                "mean_codebleu": 0.0,
-                "mean_identifier_f1": 0.0
-            }
-
-        total = len(results)
-        
-        # Helper to extract metrics from record structure
-        def get_metric(r, key):
-            if "metrics" in r and isinstance(r["metrics"], dict):
-                return r["metrics"].get(key, 0.0)
-            return r.get(key, 0.0)
-
-        sum_em = sum(get_metric(r, "exact_match") for r in results)
-        sum_edit_sim = sum(get_metric(r, "edit_similarity") for r in results)
-        sum_codebleu = sum(get_metric(r, "codebleu") for r in results)
-        sum_id_f1 = sum(get_metric(r, "identifier_f1") for r in results)
-
-        return {
-            "exact_match": round(sum_em / total, 2),
-            "mean_edit_similarity": round(sum_edit_sim / total, 2),
-            "mean_codebleu": round(sum_codebleu / total, 2),
-            "mean_identifier_f1": round(sum_id_f1 / total, 2),
-        }
-
-    # =========================================================================
-    # Core Sample Evaluation
-    # =========================================================================
 
     @classmethod
     def evaluate_sample(cls, prediction: str, ground_truth: str) -> Dict[str, float]:
         """
         Computes all evaluation metrics for a single prediction vs ground truth pair.
-        All output metrics are normalized to the scale of [0.0 - 100.0].
         """
         pred_clean = cls._normalize_code(prediction)
         gt_clean = cls._normalize_code(ground_truth)
 
-        # Exact Match on a scale of 0.0 to 100.0 for uniform percentage aggregation
-        em = 100.0 if pred_clean == gt_clean else 0.0
+        em = 1.0 if pred_clean == gt_clean else 0.0
         edit_sim = cls.compute_edit_similarity(pred_clean, gt_clean)
         codebleu_score = cls.compute_codebleu(pred_clean, gt_clean)
         id_metrics = cls.compute_identifier_match(pred_clean, gt_clean)
@@ -147,7 +100,7 @@ class CodeEvaluator:
         }
 
     @classmethod
-    def evaluate_dataset(cls, results: List[Dict[str, Any]], output_file: Optional[Union[str, Path]] = None) -> Dict[str, Any]:
+    def evaluate_dataset(cls, results: List[Dict[str, Any]], output_file: Optional[str | Path] = None) -> Dict[str, Any]:
         """
         Aggregates metrics across all evaluated benchmark samples and saves summary report.
         """
@@ -155,20 +108,14 @@ class CodeEvaluator:
             return {}
 
         total = len(results)
-        
-        def get_metric(r, key):
-            if "metrics" in r and isinstance(r["metrics"], dict):
-                return r["metrics"].get(key, 0.0)
-            return r.get(key, 0.0)
-
-        sum_em = sum(get_metric(r, "exact_match") for r in results)
-        sum_edit_sim = sum(get_metric(r, "edit_similarity") for r in results)
-        sum_codebleu = sum(get_metric(r, "codebleu") for r in results)
-        sum_id_f1 = sum(get_metric(r, "identifier_f1") for r in results)
+        sum_em = sum(r.get("exact_match", 0.0) for r in results)
+        sum_edit_sim = sum(r.get("edit_similarity", 0.0) for r in results)
+        sum_codebleu = sum(r.get("codebleu", 0.0) for r in results)
+        sum_id_f1 = sum(r.get("identifier_f1", 0.0) for r in results)
 
         summary = {
             "total_samples": total,
-            "exact_match_pct": round(sum_em / total, 2),
+            "exact_match_pct": round(sum_em / total * 100.0, 2),
             "mean_edit_similarity": round(sum_edit_sim / total, 2),
             "mean_codebleu": round(sum_codebleu / total, 2),
             "mean_identifier_f1": round(sum_id_f1 / total, 2),
@@ -192,31 +139,27 @@ class CodeEvaluator:
                 "detailed_results": results
             }
             with open(path, "w", encoding="utf-8") as f:
-                json.dump(report_data, f, indent=2, ensure_ascii=False)
+                json.dump(report_data, f, indent=2)
             print(f"[CodeEvaluator] Full evaluation report saved to {path}")
 
         return summary
 
     @staticmethod
     def _normalize_code(code: str) -> str:
-        """Removes trailing whitespace and empty lines for clean comparison."""
+        """Removes trailing whitespace, comments, and empty lines for clean comparison."""
         lines = [line.rstrip() for line in code.strip().splitlines() if line.strip()]
         return "\n".join(lines)
 
     @staticmethod
     def _simple_token_bleu(pred: str, gt: str) -> float:
-        """Fallback n-gram token overlap BLEU estimation."""
         pred_tokens = pred.split()
         gt_tokens = gt.split()
         if not pred_tokens or not gt_tokens:
             return 0.0
-        
-        # 1-gram & 2-gram overlap average
-        overlap1 = len(set(pred_tokens) & set(gt_tokens)) / max(len(pred_tokens), 1)
-        
-        pred_bigrams = set(zip(pred_tokens[:-1], pred_tokens[1:]))
-        gt_bigrams = set(zip(gt_tokens[:-1], gt_tokens[1:]))
-        overlap2 = (len(pred_bigrams & gt_bigrams) / max(len(pred_bigrams), 1)) if pred_bigrams else overlap1
-
-        score = (overlap1 + overlap2) / 2.0
-        return round(score * 100.0, 2)
+        overlap = len(set(pred_tokens) & set(gt_tokens))
+        precision = overlap / len(pred_tokens)
+        recall = overlap / len(gt_tokens)
+        if precision + recall == 0:
+            return 0.0
+        f_score = 2 * (precision * recall) / (precision + recall)
+        return round(f_score * 100.0, 2)
