@@ -12,7 +12,7 @@ from src.data_loader import RepoDataLoader
 from src.generator import CodeGenerator
 from src.retriever import HybridRetriever, DenseRetriever, BM25Retriever
 from src.dependency_graph import DependencyGraph
-from src.ast_parser import RepoASTParser
+from src.ast_parser import ASTParser
 from src.evaluator import CodeEvaluator
 from src.checkpoint import backup_to_kaggle_dataset
 
@@ -55,7 +55,7 @@ def run_benchmark(
 
     # 3. Index Repository
     files_data = RepoDataLoader.load_repo_files(repo_dir)
-    parser = RepoASTParser()
+    parser = ASTParser()
     all_chunks = parser.parse_repository(files_data)
 
     retriever = HybridRetriever(
