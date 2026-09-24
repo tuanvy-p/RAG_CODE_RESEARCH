@@ -94,19 +94,25 @@ class CodeGenerator:
         # ĐẢM BẢO MODEL NẰM TRỌN TRÊN DEVICE CHỈ ĐỊNH (VD: cuda:0)
         device_map_target = {"": self.device} if "cuda" in self.device else "auto"
 
-        # ÉP SỬ DỤNG 4-BIT QUANTIZATION ĐỂ AN TOÀN VRAM TRÊN KAGGLE T4
-        from transformers import BitsAndBytesConfig
-        quantization_config = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_quant_type="nf4",
-            bnb_4bit_compute_dtype=torch.float16
-        )
-
         model_kwargs = {
             "device_map": device_map_target,
             "trust_remote_code": True,
-            "quantization_config": quantization_config
         }
+
+        # TỰ ĐỘNG BẬT 4-BIT NẾU CÓ BITSANDBYTES, NẾU KHÔNG THÌ FALLBACK FLOAT16
+        try:
+            import bitsandbytes
+            from transformers import BitsAndBytesConfig
+            
+            model_kwargs["quantization_config"] = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_compute_dtype=torch.float16
+            )
+            print("[CodeGenerator] Using bitsandbytes 4-bit quantization.")
+        except Exception as e:
+            print(f"[Warning] 4-bit quantization unavailable ({e}). Falling back to torch.float16.")
+            model_kwargs["torch_dtype"] = torch.float16 if "cuda" in self.device else torch.float32
 
         self.model = AutoModelForCausalLM.from_pretrained(self.model_name, **model_kwargs)
         
@@ -116,7 +122,7 @@ class CodeGenerator:
             model=self.model,
             tokenizer=self.tokenizer
         )
-        print(f"[SUCCESS] Model `{self.model_name}` loaded in 4-bit on `{self.device}`!")
+        print(f"[SUCCESS] Model `{self.model_name}` loaded successfully on `{self.device}`!")
 
     def generate(
         self,
