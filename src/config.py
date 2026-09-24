@@ -33,7 +33,7 @@ class ModelConfig:
     
     temperature: float = 0.2
     max_tokens: int = 512
-    device: str = "cuda" if torch.cuda.is_available() else "cpu"
+    device: str = "cuda:0" if torch.cuda.is_available() else "cpu"
     torch_dtype: str = "float16"
     use_4bit: bool = False
 

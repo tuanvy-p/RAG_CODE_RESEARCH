@@ -84,16 +84,21 @@ class CodeGenerator:
         
         self.model_name = str(selected_model).strip()
         self.temperature = temperature if temperature is not None else config.model.temperature
-        self.device = device or getattr(config.model, 'device', 'cuda' if torch.cuda.is_available() else 'cpu')
+        self.device = device or getattr(config.model, 'device', 'cuda:0' if torch.cuda.is_available() else 'cpu')
 
         print(f"[*] Loading Local LLM Model: `{self.model_name}` on `{self.device}`...")
 
-        # Khởi tạo Tokenizer & Model
+        # Khởi tạo Tokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_name, trust_remote_code=True)
-        
-        # Cấu hình load model dạng FP16 hoặc INT4 để tối ưu VRAM
+        if self.tokenizer.pad_token_id is None:
+            self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
+
+        # ĐẢM BẢO MODEL NẰM TRỌN TRÊN DEVICE CHỈ ĐỊNH (VD: cuda:0)
+        # Không dùng "auto" để tránh HuggingFace tự phân bổ sang GPU 1 (cuda:1)
+        device_map_target = {"": self.device} if "cuda" in self.device else "auto"
+
         model_kwargs = {
-            "device_map": "auto",
+            "device_map": device_map_target,
             "trust_remote_code": True
         }
         
@@ -105,7 +110,7 @@ class CodeGenerator:
                 bnb_4bit_compute_dtype=torch.float16
             )
         else:
-            model_kwargs["torch_dtype"] = torch.float16 if self.device == "cuda" else torch.float32
+            model_kwargs["dtype"] = torch.float16 if "cuda" in self.device else torch.float32
 
         self.model = AutoModelForCausalLM.from_pretrained(self.model_name, **model_kwargs)
         
@@ -115,7 +120,7 @@ class CodeGenerator:
             model=self.model,
             tokenizer=self.tokenizer
         )
-        print(f"[SUCCESS] Model `{self.model_name}` loaded successfully!")
+        print(f"[SUCCESS] Model `{self.model_name}` loaded successfully on `{self.device}`!")
 
     def generate(
         self,
@@ -148,13 +153,12 @@ class CodeGenerator:
                 max_new_tokens=tokens,
                 temperature=temp,
                 do_sample=True if temp > 0 else False,
-                pad_token_id=self.tokenizer.eos_token_id
+                pad_token_id=self.tokenizer.pad_token_id,
+                eos_token_id=self.tokenizer.eos_token_id,
+                return_full_text=False  # Chỉ lấy chuỗi sinh thêm, tránh bị lặp lại prompt
             )
 
-            # Lấy chuỗi mã được sinh ra (loại bỏ phần prompt ban đầu)
-            full_generated = outputs[0]["generated_text"]
-            raw_text = full_generated[len(formatted_prompt):]
-
+            raw_text = outputs[0]["generated_text"]
             return self._clean_completion_output(raw_text, is_line_level=is_line_level)
 
         except Exception as e:
