@@ -118,17 +118,41 @@ class ASTParser:
     def __init__(self):
         self.parser = _GLOBAL_PARSER
 
-    def parse_repository(self, files_data: Dict[str, str]) -> List[CodeChunk]:
+    def parse_repository(self, files_data: Union[Dict[str, str], List[Any]]) -> List[CodeChunk]:
         """
-        Parses a dictionary of {file_path: code_content} representing a repository.
+        Parses repository files. Accepts either:
+        - Dict[str, str]: {"file_path": "code_content"}
+        - List[Dict]: [{"file_path": ..., "code": ...}] or List of custom file objects
         """
         all_chunks: List[CodeChunk] = []
-        for file_path, code in files_data.items():
-            try:
-                chunks = self.parse_code(code, file_path=file_path)
-                all_chunks.extend(chunks)
-            except Exception as e:
-                print(f"[Warning] Failed to parse file {file_path}: {e}")
+        
+        # Trường hợp 1: files_data là Dictionary {"path": "code"}
+        if isinstance(files_data, dict):
+            for file_path, code in files_data.items():
+                try:
+                    chunks = self.parse_code(code, file_path=str(file_path))
+                    all_chunks.extend(chunks)
+                except Exception as e:
+                    print(f"[Warning] Failed to parse file {file_path}: {e}")
+                    
+        # Trường hợp 2: files_data là List
+        elif isinstance(files_data, list):
+            for item in files_data:
+                try:
+                    if isinstance(item, dict):
+                        file_path = item.get("file_path") or item.get("path") or "snippet.py"
+                        code = item.get("code") or item.get("content") or ""
+                    else:
+                        # Nếu item là object có attribute file_path và code
+                        file_path = getattr(item, "file_path", getattr(item, "path", "snippet.py"))
+                        code = getattr(item, "code", getattr(item, "content", ""))
+                    
+                    if code:
+                        chunks = self.parse_code(code, file_path=str(file_path))
+                        all_chunks.extend(chunks)
+                except Exception as e:
+                    print(f"[Warning] Failed to parse item in files_data: {e}")
+                    
         return all_chunks
 
     def parse_repo(self, files_data: Dict[str, str]) -> List[CodeChunk]:
