@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Dict, Set, Optional, Any
+from typing import List, Dict, Set, Optional, Any, Union
 import re
 import ast
 
@@ -118,7 +118,24 @@ class ASTParser:
     def __init__(self):
         self.parser = _GLOBAL_PARSER
 
-    def parse_file(self, file_path: str | Path) -> List[CodeChunk]:
+    def parse_repository(self, files_data: Dict[str, str]) -> List[CodeChunk]:
+        """
+        Parses a dictionary of {file_path: code_content} representing a repository.
+        """
+        all_chunks: List[CodeChunk] = []
+        for file_path, code in files_data.items():
+            try:
+                chunks = self.parse_code(code, file_path=file_path)
+                all_chunks.extend(chunks)
+            except Exception as e:
+                print(f"[Warning] Failed to parse file {file_path}: {e}")
+        return all_chunks
+
+    def parse_repo(self, files_data: Dict[str, str]) -> List[CodeChunk]:
+        """Alias for parse_repository"""
+        return self.parse_repository(files_data)
+
+    def parse_file(self, file_path: Union[str, Path]) -> List[CodeChunk]:
         """Reads and parses a source file into semantic chunks."""
         path = Path(file_path)
         if not path.exists():
@@ -215,7 +232,7 @@ class ASTParser:
 
     def _create_ast_func_chunk(
         self,
-        node: ast.FunctionDef | ast.AsyncFunctionDef,
+        node: Union[ast.FunctionDef, ast.AsyncFunctionDef],
         lines: List[str],
         code: str,
         file_path: str,
@@ -523,3 +540,7 @@ class ASTParser:
         s = max(0, start_line - 1)
         e = min(len(lines), end_line)
         return "\n".join(lines[s:e])
+
+
+# Bổ sung Bí danh (Alias) tương thích
+RepoASTParser = ASTParser
