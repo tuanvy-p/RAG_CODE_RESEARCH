@@ -132,7 +132,14 @@ class CodeGenerator:
         is_line_level: bool = False
     ) -> str:
         temp = temperature if temperature is not None else self.temperature
-        tokens = max_tokens if max_tokens is not None else getattr(config.model, 'max_tokens', 512)
+        
+        # TỰ ĐỘNG SIẾT TỐI ĐA TOKENS CHO LINE/API LEVEL (Cắt hiện tượng over-generation)
+        if max_tokens is not None:
+            tokens = max_tokens
+        elif is_line_level:
+            tokens = 64
+        else:
+            tokens = getattr(config.model, 'max_tokens', 512)
 
         messages = [
             {"role": "system", "content": PromptBuilder.SYSTEM_PROMPT},
@@ -234,6 +241,7 @@ class CodeGenerator:
                 lines = lines[:-1]
             text = "\n".join(lines).strip()
 
+        # NẾU LÀ LINE LEVEL HẶC API LEVEL: CHỈ GIỮ LẠI DÒNG LỆNH HỢP LỆ ĐẦU TIÊN
         if is_line_level:
             non_empty_lines = [l for l in text.splitlines() if l.strip()]
             return non_empty_lines[0] if non_empty_lines else ""
