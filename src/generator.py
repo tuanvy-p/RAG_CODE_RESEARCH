@@ -32,7 +32,6 @@ class PromptBuilder:
             if chunk.signature:
                 header += f"\n# Signature: {chunk.signature}"
             
-            # Cắt bớt code nếu chunk quá dài (> 30 dòng)
             code_lines = chunk.code.splitlines()
             if len(code_lines) > 30:
                 truncated_code = "\n".join(code_lines[:30]) + "\n# ... (truncated)"
@@ -73,7 +72,6 @@ class CodeGenerator:
     ):
         load_dotenv()
         
-        # Lấy tên model local từ config
         selected_model = (
             model_name
             or os.getenv("LLM_MODEL")
@@ -86,12 +84,10 @@ class CodeGenerator:
 
         print(f"[*] Loading Local LLM Model: `{self.model_name}` on `{self.device}`...")
 
-        # Khởi tạo Tokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_name, trust_remote_code=True)
         if self.tokenizer.pad_token_id is None:
             self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
 
-        # ĐẢM BẢO MODEL NẰM TRỌN TRÊN DEVICE CHỈ ĐỊNH (VD: cuda:0)
         device_map_target = {"": self.device} if "cuda" in self.device else "auto"
 
         model_kwargs = {
@@ -99,7 +95,6 @@ class CodeGenerator:
             "trust_remote_code": True,
         }
 
-        # TỰ ĐỘNG BẬT 4-BIT NẾU CÓ BITSANDBYTES, NẾU KHÔNG THÌ FALLBACK FLOAT16
         try:
             import bitsandbytes
             from transformers import BitsAndBytesConfig
@@ -116,7 +111,6 @@ class CodeGenerator:
 
         self.model = AutoModelForCausalLM.from_pretrained(self.model_name, **model_kwargs)
         
-        # Khởi tạo Pipeline
         self.pipe = pipeline(
             "text-generation",
             model=self.model,
@@ -133,7 +127,6 @@ class CodeGenerator:
     ) -> str:
         temp = temperature if temperature is not None else self.temperature
         
-        # TỰ ĐỘNG SIẾT TỐI ĐA TOKENS CHO LINE/API LEVEL (Cắt hiện tượng over-generation)
         if max_tokens is not None:
             tokens = max_tokens
         elif is_line_level:
@@ -152,8 +145,11 @@ class CodeGenerator:
             add_generation_prompt=True
         )
 
+        # GIỚI HẠN CONTEXT LENGTH TRÁNH OOM GPU (Max 3500 tokens input)
+        input_tokens = self.tokenizer.encode(formatted_prompt, truncation=True, max_length=3500)
+        formatted_prompt = self.tokenizer.decode(input_tokens, skip_special_tokens=False)
+
         try:
-            # Sửa cấu hình sinh chuỗi để xóa Deprecation Warnings
             outputs = self.pipe(
                 formatted_prompt,
                 max_new_tokens=tokens,
@@ -218,7 +214,9 @@ class CodeGenerator:
                 "generated_code": current_prediction
             })
             
-            current_query = f"{current_query}\n{current_prediction}"
+            # Cắt bớt sliding window cho iteration tiếp theo để tránh bùng nổ độ dài query
+            pred_lines = current_prediction.splitlines()[:5]
+            current_query = f"{current_query}\n" + "\n".join(pred_lines)
 
         return {
             "final_code": current_prediction,
@@ -233,15 +231,16 @@ class CodeGenerator:
         if "<COMPLETION_START>" in text:
             text = text.split("<COMPLETION_START>")[-1].strip()
 
-        if text.startswith("```"):
+        # Làm sạch Markdown fences chuẩn xác
+        if "```" in text:
             lines = text.splitlines()
-            if len(lines) > 0 and lines[0].startswith("```"):
-                lines = lines[1:]
-            if len(lines) > 0 and lines[-1].strip() == "```":
-                lines = lines[:-1]
-            text = "\n".join(lines).strip()
+            cleaned_lines = []
+            for line in lines:
+                if line.strip().startswith("```"):
+                    continue
+                cleaned_lines.append(line)
+            text = "\n".join(cleaned_lines).strip()
 
-        # NẾU LÀ LINE LEVEL HẶC API LEVEL: CHỈ GIỮ LẠI DÒNG LỆNH HỢP LỆ ĐẦU TIÊN
         if is_line_level:
             non_empty_lines = [l for l in text.splitlines() if l.strip()]
             return non_empty_lines[0] if non_empty_lines else ""
