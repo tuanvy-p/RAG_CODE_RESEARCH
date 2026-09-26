@@ -4,10 +4,10 @@ import os
 # Thêm thư mục hiện tại vào sys.path để tránh lỗi ModuleNotFoundError
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from src_test.config import config
-from src_test.ast_parser import CodeChunk
-from src_test.retriever import HybridRetriever
-from src_test.generator import CodeGenerator
+from src.config import config
+from src.ast_parser import CodeChunk
+from src.retriever import HybridRetriever
+from src.generator import CodeGenerator
 
 def test_pipeline():
     print("=" * 50)

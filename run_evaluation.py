@@ -76,7 +76,7 @@ def run_benchmark(
 
     evaluator = CodeEvaluator()
 
-    # 5. Vòng lặp Đánh giá (Tự bỏ qua sample đã chạy)
+    # 5. Vòng lặp Đánh giá (Tự bỏ qua sample đã chạy + Bẫy lỗi Crash cho từng sample)
     for idx, sample in enumerate(benchmark_samples, 1):
         sample_id = sample.get("metadata", {}).get("task_id", f"{dataset_name}_sample_{idx}")
 
@@ -87,17 +87,27 @@ def run_benchmark(
         ground_truth = sample.get("ground_truth", "") or sample.get("suffix", "")
         file_path = sample.get("metadata", {}).get("file_path", "target_file.py")
 
-        result = generator.generate_with_repocoder_loop(
-            retriever=retriever,
-            prefix_code=prefix_code,
-            file_path=file_path,
-            max_iterations=config.repocoder.max_iterations,
-            top_k=config.retriever.top_k,
-            is_line_level=is_line_level
-        )
+        # BỔ SUNG TRY...EXCEPT: Bọc toàn bộ quá trình Generate & Evaluate
+        try:
+            result = generator.generate_with_repocoder_loop(
+                retriever=retriever,
+                prefix_code=prefix_code,
+                file_path=file_path,
+                max_iterations=config.repocoder.max_iterations,
+                top_k=config.retriever.top_k,
+                is_line_level=is_line_level
+            )
 
-        predicted_code = result["final_code"]
-        metrics = evaluator.evaluate_single_sample(predicted_code, ground_truth)
+            predicted_code = result["final_code"]
+            metrics = evaluator.evaluate_single_sample(predicted_code, ground_truth)
+            history = result.get("history", [])
+
+        except Exception as e:
+            # Nếu 1 sample bị OOM hoặc lỗi AST, in cảnh báo, ghi nhận kết quả rỗng và BỎ QUA ĐỂ CHẠY TIẾP
+            print(f"\n[WARNING] Error at sample {idx}/{len(benchmark_samples)} ({sample_id}): {e}")
+            predicted_code = ""
+            metrics = evaluator.evaluate_single_sample("", ground_truth)
+            history = [{"error": str(e)}]
 
         record = {
             "sample_id": sample_id,
@@ -106,7 +116,7 @@ def run_benchmark(
             "ground_truth": ground_truth,
             "predicted_code": predicted_code,
             "metrics": metrics,
-            "history": result.get("history", [])
+            "history": history
         }
 
         completed_samples.append(record)
