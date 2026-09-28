@@ -145,7 +145,7 @@ class CodeGenerator:
             add_generation_prompt=True
         )
 
-        # GIỚI HẠN CONTEXT LENGTH TRÁNH OOM GPU (Max 3500 tokens input)
+        # Truncation bảo vệ OOM
         input_tokens = self.tokenizer.encode(formatted_prompt, truncation=True, max_length=3500)
         formatted_prompt = self.tokenizer.decode(input_tokens, skip_special_tokens=False)
 
@@ -174,23 +174,34 @@ class CodeGenerator:
         file_path: str = "current_file.py",
         max_iterations: int = 1,
         top_k: int = 2,
-        is_line_level: bool = False
+        is_line_level: bool = False,
+        dense_weight: Optional[float] = None,
+        sparse_weight: Optional[float] = None,
+        expand_graph: Optional[bool] = None
     ) -> Dict[str, Any]:
+        """
+        Supports Ablation Study parameters: dense_weight, sparse_weight, and expand_graph.
+        """
         history: List[Dict[str, Any]] = []
         current_prediction = ""
+
+        # Lấy tham số cấu hình mặc định nếu không truyền từ bên ngoài
+        d_weight = dense_weight if dense_weight is not None else getattr(config.retriever, "dense_weight", 0.5)
+        s_weight = sparse_weight if sparse_weight is not None else getattr(config.retriever, "sparse_weight", 0.5)
+        exp_graph = expand_graph if expand_graph is not None else True
 
         lines = prefix_code.splitlines()
         window_size = getattr(config.repocoder, "sliding_window_size", 20)
         current_query = "\n".join(lines[-window_size:]) if len(lines) > window_size else prefix_code
 
         for iteration in range(max_iterations):
-            # 1. Retrieve Context
+            # 1. Retrieve Context với tham số Ablation
             retrieved_chunks = retriever.retrieve(
                 query=current_query,
                 top_k=top_k,
-                dense_weight=getattr(config.retriever, "dense_weight", 0.5),
-                sparse_weight=getattr(config.retriever, "sparse_weight", 0.5),
-                expand_graph=True,
+                dense_weight=d_weight,
+                sparse_weight=s_weight,
+                expand_graph=exp_graph,
                 hops=getattr(config.retriever, "graph_expansion_hops", 1)
             )
 
@@ -201,7 +212,7 @@ class CodeGenerator:
                 file_path=file_path
             )
 
-            # 3. Generate completion locally
+            # 3. Generate completion
             current_prediction = self.generate(
                 prompt=prompt,
                 is_line_level=is_line_level
@@ -214,7 +225,6 @@ class CodeGenerator:
                 "generated_code": current_prediction
             })
             
-            # Cắt bớt sliding window cho iteration tiếp theo để tránh bùng nổ độ dài query
             pred_lines = current_prediction.splitlines()[:5]
             current_query = f"{current_query}\n" + "\n".join(pred_lines)
 
@@ -231,7 +241,6 @@ class CodeGenerator:
         if "<COMPLETION_START>" in text:
             text = text.split("<COMPLETION_START>")[-1].strip()
 
-        # Làm sạch Markdown fences chuẩn xác
         if "```" in text:
             lines = text.splitlines()
             cleaned_lines = []
