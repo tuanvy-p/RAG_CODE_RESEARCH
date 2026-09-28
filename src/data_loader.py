@@ -83,16 +83,28 @@ class RepoDataLoader:
     @classmethod
     def _normalize_sample_record(cls, data: Dict[str, Any], idx: int) -> Dict[str, Any]:
         """
-        Normalizes RepoCoder / RepoEval benchmark record formats.
-        Flattens nested 'metadata' dictionary fields (ground_truth, fpath_tuple, etc.).
+        Normalizes RepoCoder, RepoEval, and RepoBench benchmark record formats.
+        Flattens nested 'metadata' dictionary fields and maps dataset-specific keys.
         """
         metadata = data.get("metadata", {})
         
-        # Ground Truth
+        # 1. GROUND TRUTH (Hỗ trợ RepoCoder, RepoEval & RepoBench 'target'/'code_snippet')
         if "ground_truth" not in data:
-            data["ground_truth"] = metadata.get("ground_truth") or data.get("target_code", "")
+            data["ground_truth"] = (
+                data.get("target") 
+                or data.get("code_snippet") 
+                or metadata.get("ground_truth") 
+                or data.get("target_code", "")
+            )
 
-        # File Path & Repo Name
+        # 2. PROMPT / PREFIX (Hỗ trợ RepoBench ghép 'context' + 'import_statement')
+        if "prompt" not in data and "prefix" not in data:
+            context = data.get("context", "")
+            imports = data.get("import_statement", "")
+            if context or imports:
+                data["prompt"] = f"{context}\n{imports}".strip()
+
+        # 3. FILE PATH & REPO NAME
         if "file_path" not in data:
             fpath_tuple = metadata.get("fpath_tuple", [])
             if fpath_tuple and isinstance(fpath_tuple, list):
@@ -100,9 +112,11 @@ class RepoDataLoader:
                 data["file_path"] = "/".join(fpath_tuple[1:]) if len(fpath_tuple) > 1 else fpath_tuple[0]
                 data["full_fpath"] = "/".join(fpath_tuple)
             else:
-                data["file_path"] = data.get("fpath", f"sample_{idx}.py")
+                data["file_path"] = data.get("fpath", data.get("file_name", f"sample_{idx}.py"))
 
-        data.setdefault("sample_id", metadata.get("task_id") or f"sample_{idx}")
+        # 4. SAMPLE ID
+        data.setdefault("sample_id", data.get("id") or metadata.get("task_id") or f"sample_{idx}")
+        
         return data
 
     # Alias for backward compatibility
