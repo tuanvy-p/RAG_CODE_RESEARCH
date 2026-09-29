@@ -37,7 +37,6 @@ def run_benchmark(
     print(f"⚙️ Config -> Top-K: {top_k} | Dense: {dense_weight} | BM25: {sparse_weight} | AST Graph: {expand_graph}")
     print("=" * 70)
 
-    # 1. Tự động sinh tên file output & zip checkpoint
     out_dir_path = Path(output_dir)
     out_dir_path.mkdir(parents=True, exist_ok=True)
 
@@ -47,18 +46,23 @@ def run_benchmark(
     completed_samples = []
     processed_ids = set()
 
-    # 2. Load tiến trình cũ nếu checkpoint đã tồn tại
+    # 1. Load tiến trình checkpoint cũ nếu có
     if output_file.exists():
         try:
             with open(output_file, "r", encoding="utf-8") as f:
                 saved_data = json.load(f)
                 completed_samples = saved_data.get("samples", [])
-                processed_ids = {s["sample_id"] for s in completed_samples if "sample_id" in s}
+                # Chuẩn hóa cách lấy ID đã xử lý
+                processed_ids = {
+                    s.get("sample_id") or s.get("metadata", {}).get("task_id") 
+                    for s in completed_samples 
+                    if s.get("sample_id") or s.get("metadata", {}).get("task_id")
+                }
             print(f"[*] RESUMING CHECKPOINT: Found {len(completed_samples)} samples already evaluated.")
         except Exception as e:
             print(f"[Warning] Could not read existing checkpoint file: {e}")
 
-    # 3. Index Repository
+    # 2. Index Repository
     files_data = RepoDataLoader.load_repo_files(repo_dir)
     parser = ASTParser()
     all_chunks = parser.parse_repository(files_data)
@@ -70,7 +74,7 @@ def run_benchmark(
     )
     retriever.index_repository(all_chunks)
 
-    # 4. Load Model Generator & Data Benchmark
+    # 3. Load Model Generator & Data Benchmark
     generator = CodeGenerator()
     benchmark_samples = RepoDataLoader.load_benchmark_dataset(benchmark_file)
 
@@ -81,16 +85,37 @@ def run_benchmark(
 
     evaluator = CodeEvaluator()
 
-    # 5. Vòng lặp Đánh giá (An toàn & Bẫy lỗi từng sample)
+    # 4. Vòng lặp Đánh giá
     for idx, sample in enumerate(benchmark_samples, 1):
-        sample_id = sample.get("sample_id") or sample.get("metadata", {}).get("task_id", f"{dataset_name}_sample_{idx}")
+        # Định danh sample_id nhất quán
+        sample_id = (
+            sample.get("sample_id") 
+            or sample.get("metadata", {}).get("task_id") 
+            or sample.get("id") 
+            or f"{dataset_name}_sample_{idx}"
+        )
 
         if sample_id in processed_ids:
             continue
 
-        prefix_code = sample.get("prompt", "") or sample.get("prefix", "")
-        ground_truth = sample.get("ground_truth", "") or sample.get("suffix", "")
-        file_path = sample.get("file_path") or sample.get("metadata", {}).get("file_path", "target_file.py")
+        # Lấy prompt và ground_truth với đa dạng keys
+        prefix_code = (
+            sample.get("prompt") 
+            or sample.get("prefix") 
+            or sample.get("context", "")
+        )
+        
+        ground_truth = (
+            sample.get("ground_truth") 
+            or sample.get("suffix") 
+            or sample.get("target") 
+            or sample.get("code_snippet", "")
+        )
+        
+        file_path = (
+            sample.get("file_path") 
+            or sample.get("metadata", {}).get("file_path", "target_file.py")
+        )
 
         try:
             result = generator.generate_with_repocoder_loop(
@@ -130,7 +155,7 @@ def run_benchmark(
 
         summary = evaluator.compute_aggregate_metrics(completed_samples)
 
-        # Ghi đè tiến trình vào file JSON
+        # Ghi đè tiến trình
         with open(output_file, "w", encoding="utf-8") as f:
             json.dump({
                 "dataset_name": dataset_name,
@@ -141,7 +166,7 @@ def run_benchmark(
 
         print(f"[{dataset_name}] Saved {len(completed_samples)}/{len(benchmark_samples)} | Current EM: {summary['exact_match']:.2f}% | CodeBLEU: {summary['mean_codebleu']:.2f}")
 
-        # Đồng bộ Dataset Kaggle mỗi 10 mẫu
+        # Đồng bộ Kaggle Dataset mỗi 10 mẫu
         if len(completed_samples) % 10 == 0 and dataset_id:
             try:
                 backup_to_kaggle_dataset(
@@ -158,7 +183,6 @@ def run_benchmark(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Universal Code RAG Evaluation Engine")
     
-    # Tham số chính
     parser.add_argument("--name", type=str, required=True, help="Tên bộ dữ liệu (vd: function_2k, line_4k, repobench_c)")
     parser.add_argument("--repo", type=str, required=True, help="Đường dẫn folder chứa codebase repository")
     parser.add_argument("--benchmark", type=str, required=True, help="Đường dẫn file .jsonl dữ liệu đánh giá")
@@ -166,11 +190,10 @@ if __name__ == "__main__":
     parser.add_argument("--dataset_id", type=str, default="", help="Kaggle Dataset ID nếu muốn backup checkpoint lên mây")
     parser.add_argument("--samples", type=int, default=0, help="Số lượng mẫu tối đa muốn test (0 = chạy hết)")
 
-    # Tham số cấu hình Ablation Study & Sensitivity Analysis
     parser.add_argument("--dense_weight", type=float, default=0.5, help="Trọng số Dense Retrieval (0.0 - 1.0)")
     parser.add_argument("--sparse_weight", type=float, default=0.5, help="Trọng số BM25 Retrieval (0.0 - 1.0)")
     parser.add_argument("--no_graph", action="store_true", help="Tắt tính năng AST Graph Expansion")
-    parser.add_argument("--top_k", type=int, default=2, help="Số lượng code snippets rút trích (vd: 1, 2, 3, 5)")
+    parser.add_argument("--top_k", type=int, default=2, help="Số lượng code snippets trích xuất")
 
     args = parser.parse_args()
 
