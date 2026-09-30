@@ -100,37 +100,76 @@ class RepoDataLoader:
         """
         Normalizes RepoCoder, RepoEval, and RepoBench benchmark record formats.
         Flattens nested 'metadata' dictionary fields and maps dataset-specific keys.
+        Safely handles strings, lists, and numpy arrays loaded from Parquet.
         """
         metadata = data.get("metadata", {})
-        
+        if not isinstance(metadata, dict):
+            metadata = {}
+
+        def _to_str(val: Any) -> str:
+            if val is None:
+                return ""
+            if isinstance(val, (list, tuple)):
+                return "\n".join(str(x) for x in val if x is not None)
+            # Hỗ trợ numpy array / pandas Series nếu có
+            if hasattr(val, "tolist"):
+                arr = val.tolist()
+                if isinstance(arr, (list, tuple)):
+                    return "\n".join(str(x) for x in arr if x is not None)
+                return str(arr)
+            return str(val)
+
         # 1. GROUND TRUTH (Hỗ trợ RepoCoder, RepoEval & RepoBench 'target'/'code_snippet')
-        if "ground_truth" not in data:
-            data["ground_truth"] = (
+        if "ground_truth" not in data or data["ground_truth"] is None:
+            raw_gt = (
                 data.get("target") 
-                or data.get("code_snippet") 
-                or metadata.get("ground_truth") 
-                or data.get("target_code", "")
+                if data.get("target") is not None else
+                data.get("code_snippet") 
+                if data.get("code_snippet") is not None else
+                metadata.get("ground_truth") 
+                if metadata.get("ground_truth") is not None else
+                data.get("target_code", "")
             )
+            data["ground_truth"] = _to_str(raw_gt)
+        else:
+            data["ground_truth"] = _to_str(data["ground_truth"])
 
         # 2. PROMPT / PREFIX (Hỗ trợ RepoBench ghép 'context' + 'import_statement')
         if "prompt" not in data and "prefix" not in data:
-            context = data.get("context", "")
-            imports = data.get("import_statement", "")
-            if context or imports:
-                data["prompt"] = f"{context}\n{imports}".strip()
+            context_str = _to_str(data.get("context", "")).strip()
+            imports_str = _to_str(data.get("import_statement", "")).strip()
+            
+            prompt_parts = []
+            if context_str:
+                prompt_parts.append(context_str)
+            if imports_str:
+                prompt_parts.append(imports_str)
+            
+            data["prompt"] = "\n".join(prompt_parts).strip()
+        else:
+            if "prompt" in data and data["prompt"] is not None:
+                data["prompt"] = _to_str(data["prompt"])
+            elif "prefix" in data and data["prefix"] is not None:
+                data["prefix"] = _to_str(data["prefix"])
 
         # 3. FILE PATH & REPO NAME
-        if "file_path" not in data:
+        if "file_path" not in data or not data["file_path"]:
             fpath_tuple = metadata.get("fpath_tuple", [])
-            if fpath_tuple and isinstance(fpath_tuple, list):
-                data["repo_name"] = fpath_tuple[0]
-                data["file_path"] = "/".join(fpath_tuple[1:]) if len(fpath_tuple) > 1 else fpath_tuple[0]
-                data["full_fpath"] = "/".join(fpath_tuple)
+            if hasattr(fpath_tuple, "tolist"):
+                fpath_tuple = fpath_tuple.tolist()
+
+            if isinstance(fpath_tuple, (list, tuple)) and len(fpath_tuple) > 0:
+                data["repo_name"] = str(fpath_tuple[0])
+                data["file_path"] = "/".join(str(x) for x in fpath_tuple[1:]) if len(fpath_tuple) > 1 else str(fpath_tuple[0])
+                data["full_fpath"] = "/".join(str(x) for x in fpath_tuple)
             else:
-                data["file_path"] = data.get("fpath", data.get("file_name", f"sample_{idx}.py"))
+                data["file_path"] = str(data.get("fpath") or data.get("file_name") or f"sample_{idx}.py")
+        else:
+            data["file_path"] = str(data["file_path"])
 
         # 4. SAMPLE ID
-        data.setdefault("sample_id", data.get("id") or metadata.get("task_id") or f"sample_{idx}")
+        raw_id = data.get("id") or metadata.get("task_id") or data.get("sample_id") or f"sample_{idx}"
+        data["sample_id"] = str(raw_id)
         
         return data
 
