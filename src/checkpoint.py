@@ -3,6 +3,12 @@ import json
 import shutil
 from pathlib import Path
 
+
+def is_kaggle_environment() -> bool:
+    """Kiểm tra xem code có đang chạy trong môi trường Kaggle Notebooks hay không."""
+    return os.path.exists("/kaggle") or "KAGGLE_KERNEL_RUN_TYPE" in os.environ
+
+
 def backup_to_kaggle_dataset(
     target_dir: str, 
     dataset_id: str, 
@@ -10,24 +16,34 @@ def backup_to_kaggle_dataset(
 ):
     """
     Nén thư mục target_dir (Vector DB hoặc Outputs) và push trực tiếp lên Kaggle Dataset.
+    - An toàn khi chạy trên Google Colab / Local: Nếu không ở Kaggle hoặc không có credentials,
+      sẽ tự động bỏ qua (skip) nhẹ nhàng mà không gây lỗi/crash luồng đánh giá.
     - dataset_id ví dụ: 'your_username/code-rag-checkpoint'
     """
     if not dataset_id or "/" not in dataset_id:
-        print("[CHECKPOINT] Skip backup: Invalid or missing dataset_id.")
+        return
+
+    # Nếu không phải Kaggle và không có API key Kaggle thiết lập sẵn, bỏ qua an toàn
+    has_kaggle_env_key = bool(os.environ.get("KAGGLE_USERNAME") and os.environ.get("KAGGLE_KEY"))
+    kaggle_json_path = Path.home() / ".kaggle" / "kaggle.json"
+    
+    if not is_kaggle_environment() and not has_kaggle_env_key and not kaggle_json_path.exists():
+        # Đang chạy trên Colab/Local không cấu hình Kaggle API -> Bỏ qua không in cảnh báo spam
         return
 
     try:
-        from kaggle_secrets import UserSecretsClient
-        from kaggle.api.kaggle_api_extended import KaggleApi
+        # 1. Thử lấy credential từ Kaggle Secrets nếu đang trên Kaggle
+        if is_kaggle_environment():
+            try:
+                from kaggle_secrets import UserSecretsClient
+                user_secrets = UserSecretsClient()
+                os.environ['KAGGLE_USERNAME'] = user_secrets.get_secret("KAGGLE_USERNAME")
+                os.environ['KAGGLE_KEY'] = user_secrets.get_secret("KAGGLE_KEY")
+            except Exception:
+                # Nếu không set Secrets trên Kaggle, thử dùng biến môi trường hoặc file kaggle.json có sẵn
+                pass
 
-        # Load API Credentials từ Kaggle Secrets
-        user_secrets = UserSecretsClient()
-        try:
-            os.environ['KAGGLE_USERNAME'] = user_secrets.get_secret("KAGGLE_USERNAME")
-            os.environ['KAGGLE_KEY'] = user_secrets.get_secret("KAGGLE_KEY")
-        except Exception as sec_err:
-            print(f"⚠️ [CHECKPOINT WARNING] Missing Kaggle Secrets (KAGGLE_USERNAME / KAGGLE_KEY): {sec_err}")
-            return
+        from kaggle.api.kaggle_api_extended import KaggleApi
 
         api = KaggleApi()
         api.authenticate()
@@ -40,13 +56,12 @@ def backup_to_kaggle_dataset(
 
         target_path = Path(target_dir)
         if not target_path.exists():
-            print(f"⚠️ [CHECKPOINT WARNING] Target directory '{target_dir}' does not exist.")
             return
 
         # Nén thư mục dữ liệu
         archive_base = upload_dir / zip_name
         shutil.make_archive(str(archive_base), 'zip', target_dir)
-        print(f"[*] Compressed '{target_dir}' to '{archive_base}.zip'")
+        print(f"[*] [Kaggle Backup] Compressed '{target_dir}' to '{archive_base}.zip'")
 
         # Tạo file metadata cho Dataset
         meta_path = upload_dir / "dataset-metadata.json"
@@ -65,11 +80,12 @@ def backup_to_kaggle_dataset(
                 version_notes=f"Auto checkpoint sync: {zip_name}", 
                 dir_mode="zip"
             )
-            print("🟢 [CHECKPOINT] Successfully updated Kaggle Dataset version!")
+            print(f"🟢 [CHECKPOINT] Successfully updated Kaggle Dataset: {dataset_id}")
         except Exception:
             # Nếu Dataset chưa tồn tại trên tài khoản Kaggle, tạo mới
             api.dataset_create_new(str(upload_dir), dir_mode="zip", quiet=True)
-            print("🟢 [CHECKPOINT] Created new Kaggle Dataset & uploaded successfully!")
+            print(f"🟢 [CHECKPOINT] Created new Kaggle Dataset & uploaded: {dataset_id}")
 
     except Exception as e:
-        print(f"⚠️ [CHECKPOINT WARNING] Backup skipped or failed: {e}")
+        # Log nhẹ nhàng để không làm gián đoạn vòng lặp benchmark
+        print(f"[Checkpoint Note] Kaggle sync skipped ({e})")

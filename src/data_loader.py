@@ -47,12 +47,27 @@ class RepoDataLoader:
     @classmethod
     def load_benchmark_dataset(cls, file_path: str | Path) -> List[Dict[str, Any]]:
         """
-        Loads a benchmark test dataset from a .json or .jsonl file (e.g., RepoEval, CrossCodeEval).
-        Supports both JSON Array format and JSONL (line-by-line) format.
+        Loads a benchmark test dataset from a .json, .jsonl, or .parquet file (e.g., RepoEval, CrossCodeEval, RepoBench).
+        Supports Parquet, JSON Array format, and JSONL (line-by-line) format.
         """
         path = Path(file_path)
         if not path.exists():
             raise FileNotFoundError(f"Benchmark file not found: {path}")
+
+        # 0. Hỗ trợ định dạng Parquet (.parquet)
+        if path.suffix.lower() == ".parquet":
+            try:
+                import pandas as pd
+                df = pd.read_parquet(path)
+                records = df.to_dict(orient="records")
+                return [cls._normalize_sample_record(item, idx) for idx, item in enumerate(records)]
+            except ImportError:
+                raise ImportError(
+                    "Thư viện 'pandas' hoặc 'pyarrow' chưa được cài đặt. "
+                    "Vui lòng chạy: pip install pandas pyarrow"
+                )
+            except Exception as e:
+                raise RuntimeError(f"Lỗi khi đọc file Parquet {path}: {e}")
 
         # 1. Try parsing as a standard JSON file (list of dicts)
         try:

@@ -24,4 +24,6 @@ codebleu
 rouge-score
 tqdm
 pydantic
+pandas
+pyarrow
 
