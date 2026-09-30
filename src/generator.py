@@ -15,10 +15,20 @@ class PromptBuilder:
 
     SYSTEM_PROMPT = (
         "You are an expert repository-level Python code completion model.\n"
-        "Your task is to generate the exact, syntactically correct code completion that should follow immediately after the provided code prefix.\n"
-        "Guidelines:\n"
-        "1. Utilize the provided repository context (functions, classes, dependencies) to accurately use existing APIs, types, and variables.\n"
-        "2. Return ONLY the raw code continuation without conversational explanations, commentary, or surrounding markdown fences unless necessary."
+        "Your task is to generate ONLY the exact, raw next code continuation that should follow immediately after the provided code prefix.\n"
+        "Rules:\n"
+        "1. DO NOT include any conversational text, explanations, greetings, or commentary (e.g., 'Here is the code:', 'Here is the line:').\n"
+        "2. DO NOT wrap your output in Markdown code blocks (e.g. no ```python or ```).\n"
+        "3. Output ONLY the raw Python code."
+    )
+
+    SYSTEM_PROMPT_LINE_LEVEL = (
+        "You are an expert Python code completion engine.\n"
+        "Your task is to predict ONLY the single next line of Python code that immediately follows the prefix.\n"
+        "Rules:\n"
+        "1. Output ONLY the single exact raw line of Python code.\n"
+        "2. DO NOT output any explanation, notes, or conversational text (e.g., 'Here is the line:', 'Sure!').\n"
+        "3. DO NOT wrap the line in markdown code blocks (no ``` or ```python)."
     )
 
     @classmethod
@@ -48,17 +58,18 @@ class PromptBuilder:
         cls,
         prefix_code: str,
         context_chunks: Optional[List[CodeChunk]] = None,
-        file_path: str = "current_file.py"
+        file_path: str = "current_file.py",
+        is_line_level: bool = False
     ) -> str:
         context_block = cls.build_context_block(context_chunks or [])
+        
+        target_inst = "single next line of Python code" if is_line_level else "exact code continuation"
         
         prompt = (
             f"{context_block}\n"
             f"# Target File: {file_path}\n"
-            f"# Please complete the code immediately following this prefix:\n"
-            f"```python\n"
-            f"{prefix_code}\n"
-            f"<COMPLETION_START>"
+            f"# Complete the {target_inst} immediately following this prefix:\n"
+            f"{prefix_code}"
         )
         return prompt
 
@@ -134,19 +145,25 @@ class CodeGenerator:
         else:
             tokens = getattr(config.model, 'max_tokens', 512)
 
-        messages = [
-            {"role": "system", "content": PromptBuilder.SYSTEM_PROMPT},
-            {"role": "user", "content": prompt}
-        ]
-
-        formatted_prompt = self.tokenizer.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=True
-        )
+        # 1. Format prompt cho Instruct / Chat models
+        is_instruct_model = any(keyword in self.model_name.lower() for keyword in ["instruct", "chat"])
+        
+        if is_instruct_model and hasattr(self.tokenizer, "apply_chat_template") and self.tokenizer.chat_template:
+            system_msg = PromptBuilder.SYSTEM_PROMPT_LINE_LEVEL if is_line_level else PromptBuilder.SYSTEM_PROMPT
+            messages = [
+                {"role": "system", "content": system_msg},
+                {"role": "user", "content": prompt}
+            ]
+            formatted_prompt = self.tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True
+            )
+        else:
+            formatted_prompt = prompt
 
         try:
-            # 1. Encode prompt với truncation bảo vệ VRAM/OOM
+            # 2. Tokenize prompt và đưa lên GPU
             inputs = self.tokenizer(
                 formatted_prompt,
                 return_tensors="pt",
@@ -168,14 +185,14 @@ class CodeGenerator:
             else:
                 gen_kwargs["do_sample"] = False
 
-            # 2. Gọi trực tiếp model.generate (chỉ dùng max_new_tokens, KHÔNG dùng max_length)
+            # 3. model.generate() chỉ dùng max_new_tokens
             with torch.no_grad():
                 outputs = self.model.generate(
                     **inputs,
                     **gen_kwargs
                 )
 
-            # 3. Trích xuất CHÍNH XÁC các token mới sinh (loại bỏ prompt tokens)
+            # 4. Slicing loại bỏ prompt tokens
             generated_tokens = outputs[0][input_ids.shape[1]:]
             raw_text = self.tokenizer.decode(generated_tokens, skip_special_tokens=True)
 
@@ -197,13 +214,9 @@ class CodeGenerator:
         sparse_weight: Optional[float] = None,
         expand_graph: Optional[bool] = None
     ) -> Dict[str, Any]:
-        """
-        Supports Ablation Study parameters: dense_weight, sparse_weight, and expand_graph.
-        """
         history: List[Dict[str, Any]] = []
         current_prediction = ""
 
-        # Lấy tham số cấu hình mặc định nếu không truyền từ bên ngoài
         d_weight = dense_weight if dense_weight is not None else getattr(config.retriever, "dense_weight", 0.5)
         s_weight = sparse_weight if sparse_weight is not None else getattr(config.retriever, "sparse_weight", 0.5)
         exp_graph = expand_graph if expand_graph is not None else True
@@ -213,7 +226,6 @@ class CodeGenerator:
         current_query = "\n".join(lines[-window_size:]) if len(lines) > window_size else prefix_code
 
         for iteration in range(max_iterations):
-            # 1. Retrieve Context với tham số Ablation
             retrieved_chunks = retriever.retrieve(
                 query=current_query,
                 top_k=top_k,
@@ -223,14 +235,13 @@ class CodeGenerator:
                 hops=getattr(config.retriever, "graph_expansion_hops", 1)
             )
 
-            # 2. Build prompt
             prompt = PromptBuilder.build_completion_prompt(
                 prefix_code=prefix_code,
                 context_chunks=retrieved_chunks,
-                file_path=file_path
+                file_path=file_path,
+                is_line_level=is_line_level
             )
 
-            # 3. Generate completion
             current_prediction = self.generate(
                 prompt=prompt,
                 is_line_level=is_line_level
@@ -254,23 +265,48 @@ class CodeGenerator:
 
     @staticmethod
     def _clean_completion_output(raw_output: str, is_line_level: bool = False) -> str:
+        """
+        Cleans LLM response by removing conversational prefixes, markdown wrappers,
+        and extracts the exact target code line(s).
+        """
+        import re
         text = raw_output.strip()
-        
+
         if "<COMPLETION_START>" in text:
             text = text.split("<COMPLETION_START>")[-1].strip()
 
+        # Loại bỏ markdown code blocks ```python hoặc ```
         if "```" in text:
-            lines = text.splitlines()
-            cleaned_lines = []
-            for line in lines:
-                if line.strip().startswith("```"):
-                    continue
-                cleaned_lines.append(line)
-            text = "\n".join(cleaned_lines).strip()
+            # Nếu có khối code hoàn chỉnh, bóc tách nội dung bên trong
+            match = re.search(r"```(?:python)?\s*\n?(.*?)(?:```|$)", text, re.DOTALL | re.IGNORECASE)
+            if match and match.group(1).strip():
+                text = match.group(1).strip()
+            else:
+                lines = [l for l in text.splitlines() if not l.strip().startswith("```")]
+                text = "\n".join(lines).strip()
+
+        # Danh sách các tiền tố đàm thoại phổ biến cần lọc bỏ
+        conversational_patterns = [
+            r"^(?:here(?:\s+is|\s+'s)?(?:\s+the)?(?:\s+(?:code|line|continuation|completion))?:?)\s*",
+            r"^(?:sure!?(?:\s+here(?:\s+is|\s+'s)?)?)\s*",
+            r"^(?:the(?:\s+next)?\s+line\s+(?:is|would\s+be):?)\s*",
+            r"^(?:completion:?)\s*",
+            r"^(?:next\s+line:?)\s*"
+        ]
+
+        for pat in conversational_patterns:
+            text = re.sub(pat, "", text, flags=re.IGNORECASE).strip()
 
         if is_line_level:
-            lines = [l for l in text.splitlines() if l.strip()]
-            return lines[0].strip() if lines else ""
+            lines = [l for l in text.splitlines() if l.strip() and not l.strip().startswith("```")]
+            # Lọc lại lần nữa nếu dòng đầu tiên là câu thoại
+            for line in lines:
+                clean_l = line.strip()
+                for pat in conversational_patterns:
+                    clean_l = re.sub(pat, "", clean_l, flags=re.IGNORECASE).strip()
+                if clean_l and not clean_l.startswith("```"):
+                    return clean_l
+            return ""
 
         return text
 
