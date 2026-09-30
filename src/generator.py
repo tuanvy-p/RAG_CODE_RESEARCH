@@ -145,22 +145,40 @@ class CodeGenerator:
             add_generation_prompt=True
         )
 
-        # Truncation bảo vệ OOM
-        input_tokens = self.tokenizer.encode(formatted_prompt, truncation=True, max_length=3500)
-        formatted_prompt = self.tokenizer.decode(input_tokens, skip_special_tokens=False)
-
         try:
-            outputs = self.pipe(
+            # 1. Encode prompt với truncation bảo vệ VRAM/OOM
+            inputs = self.tokenizer(
                 formatted_prompt,
-                max_new_tokens=tokens,
-                temperature=temp if temp > 0 else None,
-                do_sample=True if temp > 0 else False,
-                pad_token_id=self.tokenizer.pad_token_id,
-                eos_token_id=self.tokenizer.eos_token_id,
-                return_full_text=False
-            )
+                return_tensors="pt",
+                truncation=True,
+                max_length=3500
+            ).to(self.model.device)
 
-            raw_text = outputs[0]["generated_text"]
+            input_ids = inputs["input_ids"]
+
+            gen_kwargs = {
+                "max_new_tokens": tokens,
+                "pad_token_id": self.tokenizer.pad_token_id,
+                "eos_token_id": self.tokenizer.eos_token_id,
+            }
+
+            if temp > 0:
+                gen_kwargs["temperature"] = temp
+                gen_kwargs["do_sample"] = True
+            else:
+                gen_kwargs["do_sample"] = False
+
+            # 2. Gọi trực tiếp model.generate (chỉ dùng max_new_tokens, KHÔNG dùng max_length)
+            with torch.no_grad():
+                outputs = self.model.generate(
+                    **inputs,
+                    **gen_kwargs
+                )
+
+            # 3. Trích xuất CHÍNH XÁC các token mới sinh (loại bỏ prompt tokens)
+            generated_tokens = outputs[0][input_ids.shape[1]:]
+            raw_text = self.tokenizer.decode(generated_tokens, skip_special_tokens=True)
+
             return self._clean_completion_output(raw_text, is_line_level=is_line_level)
 
         except Exception as e:
@@ -251,8 +269,8 @@ class CodeGenerator:
             text = "\n".join(cleaned_lines).strip()
 
         if is_line_level:
-            non_empty_lines = [l for l in text.splitlines() if l.strip()]
-            return non_empty_lines[0] if non_empty_lines else ""
+            lines = [l for l in text.splitlines() if l.strip()]
+            return lines[0].strip() if lines else ""
 
         return text
 
