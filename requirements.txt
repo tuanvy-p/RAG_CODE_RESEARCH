@@ -14,7 +14,7 @@ rapidfuzz
 # Syntax Parsing (AST) & Semantic Chunking
 tree-sitter>=0.22.0
 tree-sitter-python>=0.21.0
-tree-sitter-languages
+tree-sitter
 
 # Graph Analysis & Dependency Modeling
 networkx
