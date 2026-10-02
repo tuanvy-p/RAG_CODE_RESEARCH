@@ -119,9 +119,11 @@ class RepoDataLoader:
                 return str(arr)
             return str(val)
 
-        # 1. GROUND TRUTH (Hỗ trợ RepoCoder, RepoEval & RepoBench 'target'/'code_snippet')
+        # 1. GROUND TRUTH (Hỗ trợ RepoCoder, RepoEval & RepoBench: 'next_line' / 'target' / 'code_snippet')
         if "ground_truth" not in data or data["ground_truth"] is None:
             raw_gt = (
+                data.get("next_line")
+                if data.get("next_line") is not None else
                 data.get("target") 
                 if data.get("target") is not None else
                 data.get("code_snippet") 
@@ -134,18 +136,23 @@ class RepoDataLoader:
         else:
             data["ground_truth"] = _to_str(data["ground_truth"])
 
-        # 2. PROMPT / PREFIX (Hỗ trợ RepoBench ghép 'context' + 'import_statement')
+        # 2. PROMPT / PREFIX (Hỗ trợ RepoBench 'cropped_code', hoặc ghép 'context' + 'import_statement')
         if "prompt" not in data and "prefix" not in data:
-            context_str = _to_str(data.get("context", "")).strip()
-            imports_str = _to_str(data.get("import_statement", "")).strip()
-            
-            prompt_parts = []
-            if context_str:
-                prompt_parts.append(context_str)
-            if imports_str:
-                prompt_parts.append(imports_str)
-            
-            data["prompt"] = "\n".join(prompt_parts).strip()
+            if data.get("cropped_code") is not None:
+                # RepoBench v1.1: 'cropped_code' chứa target-file code prefix
+                data["prompt"] = _to_str(data["cropped_code"])
+                data["prefix"] = data["prompt"]
+            else:
+                context_str = _to_str(data.get("context", "")).strip()
+                imports_str = _to_str(data.get("import_statement", "")).strip()
+                
+                prompt_parts = []
+                if context_str:
+                    prompt_parts.append(context_str)
+                if imports_str:
+                    prompt_parts.append(imports_str)
+                
+                data["prompt"] = "\n".join(prompt_parts).strip()
         else:
             if "prompt" in data and data["prompt"] is not None:
                 data["prompt"] = _to_str(data["prompt"])
@@ -166,6 +173,12 @@ class RepoDataLoader:
                 data["file_path"] = str(data.get("fpath") or data.get("file_name") or f"sample_{idx}.py")
         else:
             data["file_path"] = str(data["file_path"])
+
+        if "repo_name" not in data or not data["repo_name"]:
+            if data.get("repo_name"):
+                data["repo_name"] = str(data["repo_name"])
+            elif metadata.get("repo_name"):
+                data["repo_name"] = str(metadata["repo_name"])
 
         # 4. SAMPLE ID
         raw_id = data.get("id") or metadata.get("task_id") or data.get("sample_id") or f"sample_{idx}"

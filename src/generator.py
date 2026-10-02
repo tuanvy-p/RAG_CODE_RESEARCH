@@ -164,12 +164,19 @@ class CodeGenerator:
 
         try:
             # 2. Tokenize prompt và đưa lên GPU
+            print("Formatted prompt chars:", len(formatted_prompt))
+
             inputs = self.tokenizer(
                 formatted_prompt,
                 return_tensors="pt",
                 truncation=True,
                 max_length=3500
             ).to(self.model.device)
+
+            print("Tokenized input length:", inputs["input_ids"].shape[1])
+            print("Last 1000 chars of formatted prompt:")
+            print(repr(formatted_prompt[-1000:]))
+            print("=====================================\n")
 
             input_ids = inputs["input_ids"]
 
@@ -195,6 +202,9 @@ class CodeGenerator:
             # 4. Slicing loại bỏ prompt tokens
             generated_tokens = outputs[0][input_ids.shape[1]:]
             raw_text = self.tokenizer.decode(generated_tokens, skip_special_tokens=True)
+            print("\n========== GENERATION DEBUG ==========")
+            print("RAW OUTPUT:", repr(raw_text))
+            print("======================================\n")
 
             return self._clean_completion_output(raw_text, is_line_level=is_line_level)
 
@@ -212,7 +222,8 @@ class CodeGenerator:
         is_line_level: bool = False,
         dense_weight: Optional[float] = None,
         sparse_weight: Optional[float] = None,
-        expand_graph: Optional[bool] = None
+        expand_graph: Optional[bool] = None,
+        retrieval_query: Optional[str] = None  # <--- BƯỚC 1: Thêm parameter ở đây
     ) -> Dict[str, Any]:
         history: List[Dict[str, Any]] = []
         current_prediction = ""
@@ -226,14 +237,27 @@ class CodeGenerator:
         current_query = "\n".join(lines[-window_size:]) if len(lines) > window_size else prefix_code
 
         for iteration in range(max_iterations):
+            # <--- BƯỚC 2: Xác định query thực sự sẽ dùng để retrieve
+            query_for_retrieval = retrieval_query or current_query
+
             retrieved_chunks = retriever.retrieve(
-                query=current_query,
+                query=query_for_retrieval,  # <--- BƯỚC 3: Thay current_query bằng query_for_retrieval
                 top_k=top_k,
                 dense_weight=d_weight,
                 sparse_weight=s_weight,
                 expand_graph=exp_graph,
                 hops=getattr(config.retriever, "graph_expansion_hops", 1)
             )
+
+            print("\n========== RETRIEVAL DEBUG ==========")
+            for i, chunk in enumerate(retrieved_chunks, 1):
+                print(f"\n--- Retrieved Chunk {i} ---")
+                print(f"File     : {chunk.file_path}")
+                print(f"Type     : {chunk.node_type}")
+                print(f"Name     : {chunk.name}")
+                print(f"Chunk ID : {chunk.chunk_id}")
+                print(f"Code     :\n{chunk.code[:1000]}")
+            print("=====================================\n")
 
             prompt = PromptBuilder.build_completion_prompt(
                 prefix_code=prefix_code,
@@ -249,7 +273,7 @@ class CodeGenerator:
 
             history.append({
                 "iteration": iteration + 1,
-                "query_used": current_query,
+                "query_used": query_for_retrieval,  # Có thể đổi sang query_for_retrieval để log chính xác hơn
                 "retrieved_chunk_ids": [c.chunk_id for c in retrieved_chunks],
                 "generated_code": current_prediction
             })
