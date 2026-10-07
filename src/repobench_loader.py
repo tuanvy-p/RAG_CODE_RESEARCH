@@ -35,7 +35,7 @@ class RepoBenchLoader:
         """
         Lấy code prefix thực sự được dùng làm input cho model.
         """
-        return str(sample.get("cropped_code") or "").strip()
+        return str(sample.get("cropped_code") or "").lstrip("\n")
 
     @classmethod
     def get_ground_truth(cls, sample: Dict[str, Any]) -> str:
@@ -45,6 +45,10 @@ class RepoBenchLoader:
         RepoBench line-level dùng next_line.
         """
         return str(sample.get("next_line") or sample.get("ground_truth") or "").strip()
+    @classmethod
+    def get_gold_index(cls, sample: Dict[str, Any]) -> Optional[int]:
+        v = sample.get("gold_snippet_index")
+        return int(v) if v is not None else None
 
     @classmethod
     def get_file_path(cls, sample: Dict[str, Any]) -> str:
@@ -80,12 +84,24 @@ class RepoBenchLoader:
 
     @classmethod
     def get_context(cls, sample: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """
-        Lấy cross-file context được RepoBench cung cấp.
-        """
-        context = sample.get("context")
-
-        if context is None:
+        ctx = sample.get("context")
+        if ctx is None:
             return []
+        if isinstance(ctx, str):                 # có thể bị stringify khi normalize
+            ctx = json.loads(ctx)
+        if isinstance(ctx, dict):                # dạng cột: {"path": [...], "snippet": [...]}
+            keys = list(ctx.keys())
+            ctx = [dict(zip(keys, vals)) for vals in zip(*ctx.values())]
+        ctx = list(ctx)
 
-        return list(context)
+        out = []
+        for i, c in enumerate(ctx):
+            if not isinstance(c, dict):
+                raise TypeError(f"context[{i}] có kiểu {type(c)}, mong đợi dict")
+            out.append({
+                "idx": i,   # giữ index gốc để đối chiếu gold_snippet_index
+                "path": c.get("path", ""),
+                "identifier": c.get("identifier", ""),
+                "snippet": c.get("snippet", ""),
+            })
+        return out

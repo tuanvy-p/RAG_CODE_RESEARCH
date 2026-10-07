@@ -122,6 +122,8 @@ class RepoDataLoader:
         # 1. GROUND TRUTH (Hỗ trợ RepoCoder, RepoEval & RepoBench: 'next_line' / 'target' / 'code_snippet')
         if "ground_truth" not in data or data["ground_truth"] is None:
             raw_gt = (
+                data.get("groundtruth")
+                if data.get("groundtruth") is not None else
                 data.get("next_line")
                 if data.get("next_line") is not None else
                 data.get("target") 
@@ -160,25 +162,47 @@ class RepoDataLoader:
                 data["prefix"] = _to_str(data["prefix"])
 
         # 3. FILE PATH & REPO NAME
+        # Ưu tiên schema của CCEval
+        if metadata.get("repository"):
+            data["repo_name"] = str(metadata["repository"])
+
+        if metadata.get("file"):
+            data["file_path"] = str(metadata["file"])
+
+        # Fallback cho các benchmark khác
         if "file_path" not in data or not data["file_path"]:
             fpath_tuple = metadata.get("fpath_tuple", [])
+
             if hasattr(fpath_tuple, "tolist"):
                 fpath_tuple = fpath_tuple.tolist()
 
             if isinstance(fpath_tuple, (list, tuple)) and len(fpath_tuple) > 0:
-                data["repo_name"] = str(fpath_tuple[0])
-                data["file_path"] = "/".join(str(x) for x in fpath_tuple[1:]) if len(fpath_tuple) > 1 else str(fpath_tuple[0])
-                data["full_fpath"] = "/".join(str(x) for x in fpath_tuple)
-            else:
-                data["file_path"] = str(data.get("fpath") or data.get("file_name") or f"sample_{idx}.py")
-        else:
-            data["file_path"] = str(data["file_path"])
+                if "repo_name" not in data or not data["repo_name"]:
+                    data["repo_name"] = str(fpath_tuple[0])
 
+                data["file_path"] = (
+                    "/".join(str(x) for x in fpath_tuple[1:])
+                    if len(fpath_tuple) > 1
+                    else str(fpath_tuple[0])
+                )
+
+                data["full_fpath"] = "/".join(str(x) for x in fpath_tuple)
+
+            else:
+                data["file_path"] = str(
+                    data.get("fpath")
+                    or data.get("file_name")
+                    or f"sample_{idx}.py"
+                )
+
+        # Nếu repo_name vẫn chưa có thì thử các field khác
         if "repo_name" not in data or not data["repo_name"]:
             if data.get("repo_name"):
                 data["repo_name"] = str(data["repo_name"])
             elif metadata.get("repo_name"):
                 data["repo_name"] = str(metadata["repo_name"])
+            elif data.get("repository"):
+                data["repo_name"] = str(data["repository"])
 
         # 4. SAMPLE ID
         raw_id = data.get("id") or metadata.get("task_id") or data.get("sample_id") or f"sample_{idx}"
