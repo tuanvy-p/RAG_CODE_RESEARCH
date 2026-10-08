@@ -47,7 +47,7 @@ def run_repobench(
     print(f"Total samples: {len(samples)}")
 
     adapter = RepoBenchAdapter()
-    generator = CodeGenerator()
+    generator = CodeGenerator(temperature=0.0)
     evaluator = CodeEvaluator()
 
     results = []
