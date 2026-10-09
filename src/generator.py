@@ -136,6 +136,11 @@ class CodeGenerator:
         max_tokens: Optional[int] = None,
         is_line_level: bool = False
     ) -> str:
+        MAX_PROMPT_TOK = 3000
+        ids = self.tokenizer(prompt, add_special_tokens=False)["input_ids"]
+        if len(ids) > MAX_PROMPT_TOK:
+            prompt = self.tokenizer.decode(ids[-MAX_PROMPT_TOK:])
+
         temp = temperature if temperature is not None else self.temperature
         
         if max_tokens is not None:
@@ -202,6 +207,7 @@ class CodeGenerator:
             # 4. Slicing loại bỏ prompt tokens
             generated_tokens = outputs[0][input_ids.shape[1]:]
             raw_text = self.tokenizer.decode(generated_tokens, skip_special_tokens=True)
+            self.last_raw_output = raw_text
             print("\n========== GENERATION DEBUG ==========")
             print("RAW OUTPUT:", repr(raw_text))
             print("======================================\n")
@@ -283,56 +289,56 @@ class CodeGenerator:
 
         return {
             "final_code": current_prediction,
+            "raw_output": getattr(self, "last_raw_output", None),
             "iterations_count": max_iterations,
             "history": history
         }
 
+    _CHATTER_PATTERNS = [
+        r"^here(?:'s|\s+is)\b[^\n:]*:\s*",
+        r"^(?:sure|certainly)(?:[!,:]|\.(?=\s|$))\s*(?:here(?:'s|\s+is)\b[^\n:]*:\s*)?",
+        r"^the\s+next\s+line\s+(?:is|would\s+be)\b\s*:?\s*",
+        r"^(?:completion|next\s+line)\s*:\s*",
+    ]
+
+    @classmethod
+    def _strip_chatter(cls, s: str) -> str:
+        import re
+        for pat in cls._CHATTER_PATTERNS:
+            s = re.sub(pat, "", s, flags=re.IGNORECASE).strip()
+        return s
+
     @staticmethod
     def _clean_completion_output(raw_output: str, is_line_level: bool = False) -> str:
-        """
-        Cleans LLM response by removing conversational prefixes, markdown wrappers,
-        and extracts the exact target code line(s).
-        """
         import re
         text = raw_output.strip()
 
         if "<COMPLETION_START>" in text:
             text = text.split("<COMPLETION_START>")[-1].strip()
 
-        # Loại bỏ markdown code blocks ```python hoặc ```
+        # 1. Bóc markdown fence (kể cả fence không đóng)
         if "```" in text:
-            # Nếu có khối code hoàn chỉnh, bóc tách nội dung bên trong
-            match = re.search(r"```(?:python)?\s*\n?(.*?)(?:```|$)", text, re.DOTALL | re.IGNORECASE)
-            if match and match.group(1).strip():
-                text = match.group(1).strip()
+            m = re.search(r"```[a-zA-Z0-9_+-]*[ \t]*\n?(.*?)(?:```|$)", text, re.DOTALL)
+            if m and m.group(1).strip():
+                text = m.group(1).strip()
             else:
-                lines = [l for l in text.splitlines() if not l.strip().startswith("```")]
-                text = "\n".join(lines).strip()
+                text = "\n".join(
+                    l for l in text.splitlines() if not l.strip().startswith("```")
+                ).strip()
 
-        # Danh sách các tiền tố đàm thoại phổ biến cần lọc bỏ
-        conversational_patterns = [
-            r"^(?:here(?:\s+is|\s+'s)?(?:\s+the)?(?:\s+(?:code|line|continuation|completion))?:?)\s*",
-            r"^(?:sure!?(?:\s+here(?:\s+is|\s+'s)?)?)\s*",
-            r"^(?:the(?:\s+next)?\s+line\s+(?:is|would\s+be):?)\s*",
-            r"^(?:completion:?)\s*",
-            r"^(?:next\s+line:?)\s*"
-        ]
+        # 2. Bỏ lời dẫn ở đầu
+        text = CodeGenerator._strip_chatter(text)
 
-        for pat in conversational_patterns:
-            text = re.sub(pat, "", text, flags=re.IGNORECASE).strip()
+        if not is_line_level:
+            return text
 
-        if is_line_level:
-            lines = [l for l in text.splitlines() if l.strip() and not l.strip().startswith("```")]
-            # Lọc lại lần nữa nếu dòng đầu tiên là câu thoại
-            for line in lines:
-                clean_l = line.strip()
-                for pat in conversational_patterns:
-                    clean_l = re.sub(pat, "", clean_l, flags=re.IGNORECASE).strip()
-                if clean_l and not clean_l.startswith("```"):
-                    return clean_l
-            return ""
-
-        return text
+        # 3. Line-level: lấy dòng đầu tiên có nội dung và không phải comment
+        for line in text.splitlines():
+            s = CodeGenerator._strip_chatter(line.strip())
+            if not s or s.startswith("```") or s.startswith("#"):
+                continue
+            return s
+        return ""
 
     def test_connection(self) -> bool:
         print(f"[*] Testing Local LLM inference with model: `{self.model_name}`...")

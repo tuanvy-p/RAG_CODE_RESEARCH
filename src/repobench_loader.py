@@ -77,7 +77,7 @@ class RepoBenchLoader:
         if value is None:
             return ""
 
-        if isinstance(value, (list, tuple)):
+        if isinstance(value, (list, tuple, np.ndarray)):
             return "\n".join(str(x) for x in value)
 
         return str(value)
