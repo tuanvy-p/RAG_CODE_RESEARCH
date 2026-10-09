@@ -2,7 +2,7 @@ from typing import Any, Dict, List
 
 from .ast_parser import ASTParser, CodeChunk
 from .repobench_loader import RepoBenchLoader
-
+from pathlib import Path
 
 class RepoBenchAdapter:
     """
@@ -14,62 +14,33 @@ class RepoBenchAdapter:
     def __init__(self, parser: ASTParser | None = None):
         self.parser = parser or ASTParser()
 
-    def build_retrieval_chunks(
-        self,
-        sample: Dict[str, Any]
-    ) -> List[CodeChunk]:
-        """
-        Convert one RepoBench sample's context into CodeChunks.
-        """
-
-        context_items = RepoBenchLoader.get_context(sample)
-
-        if not context_items:
-            return []
-
-        files_data = []
-
-        repo_name = RepoBenchLoader.get_repo_name(sample)
-
-        for index, item in enumerate(context_items):
-
-            # RepoBench context normally contains structured
-            # information such as path/name/code.
-            if isinstance(item, dict):
-                file_path = (
-                    item.get("path")
-                    or item.get("file_path")
-                    or item.get("filepath")
-                    or f"context_{index}.py"
-                )
-
-                code = (
-                    item.get("code")
-                    or item.get("content")
-                    or item.get("snippet")
-                    or ""
-                )
-
-            else:
-                file_path = f"context_{index}.py"
-                code = str(item)
-
+    def build_retrieval_chunks(self, sample, chunk_mode: str = "snippet"):
+        repo = RepoBenchLoader.get_repo_name(sample)
+        chunks = []
+        for item in RepoBenchLoader.get_context(sample):
+            code = item.get("snippet") or ""
             if not code.strip():
                 continue
+            i = item["idx"]
+            path = f"{repo}/{item['path']}"
 
-            # Add repo name to avoid collisions between repositories.
-            unique_path = f"{repo_name}/{file_path}"
+            parsed = self.parser.parse_code(code, file_path=path)   # có thể rỗng
+            if chunk_mode == "ast":                                 # giữ làm dòng ablation
+                chunks.extend(parsed)
+                continue
 
-            files_data.append({
-                "file_path": unique_path,
-                "code": code,
-            })
-
-        if not files_data:
-            return []
-
-        chunks = self.parser.parse_repository(files_data)
-
+            calls, imports = set(), set()
+            for p in parsed:
+                calls |= p.calls
+                imports |= p.imports
+            first = next((l.strip() for l in code.splitlines() if l.strip()), "")
+            chunks.append(CodeChunk(
+                chunk_id=f"{path}::ctx{i}", file_path=path,
+                name=item.get("identifier") or Path(path).stem,
+                node_type="snippet", code=code,
+                start_line=1, end_line=len(code.splitlines()),
+                signature=first, calls=calls, imports=imports,
+            ))
         return chunks
 
     def build_dependency_graph_chunks(

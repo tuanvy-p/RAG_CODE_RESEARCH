@@ -12,6 +12,7 @@ class PromptBuilder:
     """
     Constructs clean, structured prompts for Code Completion and RAG.
     """
+    MAX_CONTEXT_LINES = 80
 
     SYSTEM_PROMPT = (
         "You are an expert repository-level Python code completion model.\n"
@@ -43,8 +44,8 @@ class PromptBuilder:
                 header += f"\n# Signature: {chunk.signature}"
             
             code_lines = chunk.code.splitlines()
-            if len(code_lines) > 30:
-                truncated_code = "\n".join(code_lines[:30]) + "\n# ... (truncated)"
+            if len(code_lines) > cls.MAX_CONTEXT_LINES:
+                truncated_code = "\n".join(code_lines[:cls.MAX_CONTEXT_LINES]) + "\n# ... (truncated)"
             else:
                 truncated_code = chunk.code
 
